@@ -76,7 +76,6 @@ import { ProfileView } from './components/ProfileView';
 import { AdminPanelView } from './components/AdminPanelView';
 import { GlobalInsightsAndGuide } from './components/GlobalInsightsAndGuide';
 import { PixelArtworkPreview } from './components/PixelArtworkPreview';
-import { BackendConfigModal } from './components/BackendConfigModal';
 import { AuthModal } from './components/AuthModal';
 import {
   applyAppearanceToDocument,
@@ -136,7 +135,6 @@ export function App() {
   const [rtdbStatus, setRtdbStatus] = useState<'connected' | 'permission-denied' | 'connecting'>(
     'connecting'
   );
-  const [showBackendModal, setShowBackendModal] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
 
   // Core Game State
@@ -2796,21 +2794,8 @@ export function App() {
         onGoogleLogin={handleGoogleLogin}
         onPasswordReset={handleResetPassword}
         onLogout={handleLogout}
-        onOpenCloudConfig={() => setShowBackendModal(true)}
+        onOpenCloudConfig={() => setActiveTab('admin')}
         onOpenAdminPanel={() => setActiveTab('admin')}
-      />
-
-      {/* FIREBASE / SUPABASE CLOUD CONFIGURATION MODAL */}
-      <BackendConfigModal
-        isOpen={showBackendModal}
-        onClose={() => setShowBackendModal(false)}
-        connectionMode={connectionMode}
-        onlineCount={stats.onlinePlayersCount}
-        rtdbStatus={rtdbStatus}
-        onConfigSaved={() => {
-          setShowBackendModal(false);
-          initializeMultiplayer();
-        }}
       />
 
       {/* FOOTER */}
