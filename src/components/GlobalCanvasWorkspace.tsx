@@ -1207,12 +1207,14 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                 <button
                   type="button"
                   className="btn primary"
-                  disabled={cooldownRemainingMs > 0 || isSubmitting}
+                  disabled={Boolean(currentUser) && (cooldownRemainingMs > 0 || isSubmitting)}
                   onClick={() => handleCommitPlace()}
                 >
-                  {cooldownRemainingMs > 0
-                    ? `Wait ${cooldownSecondsDisplay}s`
-                    : `Place (${selectedCoord.x}, ${selectedCoord.y})`}
+                  {!currentUser
+                    ? '🔒 Sign In to Place'
+                    : cooldownRemainingMs > 0
+                      ? `Wait ${cooldownSecondsDisplay}s`
+                      : `Place (${selectedCoord.x}, ${selectedCoord.y})`}
                 </button>
               </div>
             )}
@@ -1365,18 +1367,20 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
             <button
               type="button"
               className="go"
-              disabled={(!isAdmin && cooldownRemainingMs > 0) || isSubmitting}
+              disabled={Boolean(currentUser) && (((!isAdmin && cooldownRemainingMs > 0) || isSubmitting))}
               onClick={() => handleCommitPlace()}
             >
-              {!isAdmin && cooldownRemainingMs > 0
-                ? `Next pixel in ${cooldownSecondsDisplay}s`
-                : isAdmin && tool === 'erase'
-                  ? `🗑️ Erase ${adminBrushSize}×${adminBrushSize} at (${selectedCoord.x}, ${selectedCoord.y})`
-                  : isAdmin && adminBrushSize > 1
-                    ? `👑 Paint ${adminBrushSize}×${adminBrushSize} at (${selectedCoord.x}, ${selectedCoord.y})`
-                    : inspectedPixel
-                      ? `Replace (${selectedCoord.x}, ${selectedCoord.y}) with ${getColorName(selectedColor)}`
-                      : `Place ${getColorName(selectedColor)} at (${selectedCoord.x}, ${selectedCoord.y})`}
+              {!currentUser
+                ? '🔒 Sign In to Place Pixel'
+                : !isAdmin && cooldownRemainingMs > 0
+                  ? `Next pixel in ${cooldownSecondsDisplay}s`
+                  : isAdmin && tool === 'erase'
+                    ? `🗑️ Erase ${adminBrushSize}×${adminBrushSize} at (${selectedCoord.x}, ${selectedCoord.y})`
+                    : isAdmin && adminBrushSize > 1
+                      ? `👑 Paint ${adminBrushSize}×${adminBrushSize} at (${selectedCoord.x}, ${selectedCoord.y})`
+                      : inspectedPixel
+                        ? `Replace (${selectedCoord.x}, ${selectedCoord.y}) with ${getColorName(selectedColor)}`
+                        : `Place ${getColorName(selectedColor)} at (${selectedCoord.x}, ${selectedCoord.y})`}
             </button>
 
             <p className="msg" data-kind={statusMsg.kind === 'error' ? 'error' : undefined}>

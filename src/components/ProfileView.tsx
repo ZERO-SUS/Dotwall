@@ -230,8 +230,39 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   if (!profileUser) {
     return (
       <div className="view-section">
-        <div className="card">
-          <p className="empty-line">Loading player profile...</p>
+        <div
+          className="card"
+          style={{
+            textAlign: 'center',
+            padding: '48px 24px',
+            maxWidth: 520,
+            margin: '40px auto',
+          }}
+        >
+          <div style={{ fontSize: 48, marginBottom: 16 }}>🎨</div>
+          <h2 style={{ margin: '0 0 10px 0', fontSize: 24, fontWeight: 800 }}>
+            Sign In to View &amp; Customize Your Profile
+          </h2>
+          <p
+            style={{
+              color: 'var(--muted)',
+              fontSize: 14,
+              lineHeight: 1.6,
+              marginBottom: 24,
+            }}
+          >
+            Create an account or sign in with your email or Google to track your placed pixels, unlock achievements, earn badges, and set your custom user DP &amp; username.
+          </p>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 12 }}>
+            <button
+              type="button"
+              className="btn primary"
+              style={{ padding: '12px 28px', fontSize: 14, fontWeight: 700 }}
+              onClick={onOpenAuthModal}
+            >
+              <LogIn size={16} /> Sign In / Register
+            </button>
+          </div>
         </div>
       </div>
     );

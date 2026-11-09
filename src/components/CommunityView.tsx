@@ -4,6 +4,7 @@ import {
   CornerDownRight,
   Flag,
   Heart,
+  LogIn,
   MessageSquare,
   Send,
   Share2,
@@ -184,7 +185,15 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
               </select>
 
               <button type="submit" className="btn primary">
-                <Send size={14} /> Post Comment
+                {currentUser ? (
+                  <>
+                    <Send size={14} /> Post Comment
+                  </>
+                ) : (
+                  <>
+                    <LogIn size={14} /> Sign In to Post
+                  </>
+                )}
               </button>
             </div>
 

@@ -349,51 +349,35 @@ export function App() {
       )
       .map((u) => ({ ...u, isAdmin: false }));
 
+    // STRICT: Do NOT generate fake or default bot user accounts!
+    // Unauthenticated devices must explicitly register or log in.
     let savedUserId = window.localStorage.getItem(USER_ID_STORAGE_KEY);
     if (savedUserId && savedUserId.toLowerCase() === RESERVED_ADMIN_USERNAME) {
       window.localStorage.removeItem(USER_ID_STORAGE_KEY);
       savedUserId = null;
     }
 
-    let me = usersList.find((u) => u.id === savedUserId) || null;
-    if (!me) {
-      me = {
-        id: `usr-${Date.now().toString(36)}`,
-        username: `pixel_${Math.floor(1000 + Math.random() * 8999)}`,
-        displayName: 'Global Pixel Artist',
-        avatarEmoji: '👾',
-        avatarColor: '#6B3DFF',
-        bio: 'Collaborating on the 1,000,000-pixel global wall.',
-        pixelsPlaced: 0,
-        tasksCompleted: 0,
-        points: 50,
-        lastPixelAt: 0,
-        nextCooldownAt: 0,
-        joinedAt: Date.now(),
-        achievements: [],
-        isAdmin: false,
-      };
-      usersList.push(me);
-      seed.users[me.id] = me;
-      window.localStorage.setItem(USER_ID_STORAGE_KEY, me.id);
-      window.localStorage.setItem(STATIC_DB_STORAGE_KEY, JSON.stringify(seed));
-    }
+    const me = savedUserId ? usersList.find((u) => u.id === savedUserId) || null : null;
 
-    const onlinePresence = [
-      {
-        userId: me.id,
-        username: me.username,
-        avatarEmoji: me.avatarEmoji,
-        avatarColor: me.avatarColor,
-        activeView: activeTab,
-        lastSeenAt: Date.now(),
-      },
-    ];
+    const onlinePresence = me
+      ? [
+          {
+            userId: me.id,
+            username: me.username,
+            avatarEmoji: me.avatarEmoji,
+            avatarColor: me.avatarColor,
+            avatarUrl: me.avatarUrl,
+            country: me.country,
+            activeView: activeTab,
+            lastSeenAt: Date.now(),
+          },
+        ]
+      : [];
 
     setPixelsMap(map);
     setHistory(seed.history || []);
     setUsers(usersList);
-    setCurrentUser((prev) => prev || me);
+    setCurrentUser(me);
     setTasks(INITIAL_TASKS);
     setTaskSubmissions(seed.taskSubmissions || []);
     setArtworks(seed.artworks || []);
@@ -477,34 +461,16 @@ export function App() {
   // Subscribe to Firebase Authentication (dotwall-13046) session persistence
   useEffect(() => {
     const auth = getFirebaseAuth();
-    let autoAuthAttempted = false;
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) {
-        if (!autoAuthAttempted) {
-          autoAuthAttempted = true;
-          try {
-            const AUTO_CRED_KEY = 'dotwall_auto_fb_cred_v1';
-            let credObj: { email: string; password: string; username: string } | null = null;
-            const raw = window.localStorage.getItem(AUTO_CRED_KEY);
-            if (raw) {
-              credObj = JSON.parse(raw);
-            }
-            if (credObj && credObj.email && credObj.password) {
-              await loginWithEmail(credObj.email, credObj.password).catch(() => {});
-            } else {
-              const randId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-              const autoUsername = `pixel_${Math.floor(1000 + Math.random() * 8999)}`;
-              const newCred = {
-                email: `player_${randId}@dotwall.app`,
-                password: `Dw!${randId}#99`,
-                username: autoUsername,
-              };
-              window.localStorage.setItem(AUTO_CRED_KEY, JSON.stringify(newCred));
-              await registerWithEmail(newCred).catch(() => {});
-            }
-          } catch {
-            // ignore auto-auth failure
-          }
+        // STRICT: If not authenticated with Firebase Auth, currentUser is NULL!
+        // No auto-generated demo or bot accounts. New visitors must explicitly log in or register.
+        setCurrentUser(null);
+        try {
+          window.localStorage.removeItem('dotwall_auto_fb_cred_v1');
+          window.localStorage.removeItem(USER_ID_STORAGE_KEY);
+        } catch {
+          // ignore
         }
         return;
       }
@@ -2354,11 +2320,22 @@ export function App() {
           <button
             type="button"
             className="user-nav-pill"
+            style={
+              !currentUser
+                ? {
+                    background: 'var(--primary)',
+                    color: '#fff',
+                    borderColor: 'transparent',
+                    fontWeight: 700,
+                    boxShadow: '0 2px 10px rgba(107, 61, 255, 0.3)',
+                  }
+                : undefined
+            }
             onClick={() => {
               setAuthModalTab('login');
               setShowAuthModal(true);
             }}
-            title="Sign In / Switch Account"
+            title={currentUser ? 'Account Profile' : 'Sign In or Register'}
           >
             {currentUser ? (
               <>
@@ -2368,7 +2345,7 @@ export function App() {
             ) : (
               <>
                 <LogIn size={14} />
-                <span>Login</span>
+                <span>Sign In / Register</span>
               </>
             )}
           </button>
