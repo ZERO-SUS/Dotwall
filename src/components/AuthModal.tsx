@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { KeyRound, LogIn, Mail, Sparkles, UserPlus, X } from 'lucide-react';
+import { KeyRound, LogIn, LogOut, Mail, UserPlus, X } from 'lucide-react';
 import type { PlayerProfile } from '../types';
 import { AVATAR_COLORS, AVATAR_EMOJIS } from '../constants';
 
@@ -18,6 +18,8 @@ interface AuthModalProps {
     avatarColor?: string;
   }) => Promise<{ ok: boolean; error?: string }>;
   onGoogleLogin: () => Promise<{ ok: boolean; error?: string }>;
+  onPasswordReset: (email: string) => Promise<{ ok: boolean; error?: string }>;
+  onLogout: () => Promise<void>;
   onOpenCloudConfig: () => void;
 }
 
@@ -29,15 +31,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   isFirebaseActive,
   onLogin,
   onGoogleLogin,
+  onPasswordReset,
+  onLogout,
   onOpenCloudConfig,
 }) => {
-  const [tab, setTab] = useState<'login' | 'signup'>('login');
+  const [tab, setTab] = useState<'login' | 'signup' | 'reset'>('login');
   const [username, setUsername] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [avatarEmoji, setAvatarEmoji] = useState<string>('👾');
   const [avatarColor, setAvatarColor] = useState<string>('#6B3DFF');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
   if (!isOpen) return null;
@@ -45,7 +50,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setSuccessMsg(null);
     setIsLoading(true);
+
+    if (tab === 'reset') {
+      const res = await onPasswordReset(email.trim());
+      setIsLoading(false);
+      if (res.ok) {
+        setSuccessMsg(`Password reset instructions sent to ${email.trim()}!`);
+      } else {
+        setErrorMsg(res.error || 'Could not send password reset email.');
+      }
+      return;
+    }
+
     const res = await onLogin({
       mode: tab,
       email: email.trim(),
@@ -64,13 +82,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleGoogle = async () => {
     setErrorMsg(null);
+    setSuccessMsg(null);
     setIsLoading(true);
     const res = await onGoogleLogin();
     setIsLoading(false);
     if (res.ok) {
       onClose();
     } else {
-      setErrorMsg(res.error || 'Google Sign-In requires Firebase Auth configuration.');
+      setErrorMsg(res.error || 'Google Sign-In failed.');
     }
   };
 
@@ -79,15 +98,49 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       <div className="modal-card compact-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <span className="genz-pill daily">GLOBAL PLAYER ACCOUNT</span>
+            <span className="genz-pill daily">FIREBASE AUTH · UID SESSION</span>
             <h2 className="modal-title">
-              {tab === 'login' ? 'Sign In to Dotwall' : 'Create Your Dotwall Account'}
+              {tab === 'login'
+                ? 'Sign In to Dotwall'
+                : tab === 'signup'
+                  ? 'Register Dotwall Account'
+                  : 'Reset Account Password'}
             </h2>
           </div>
           <button type="button" className="icon-close-btn" onClick={onClose}>
             <X size={18} />
           </button>
         </div>
+
+        {/* Active Account Banner with Logout */}
+        {currentUser && (
+          <div className="active-session-bar">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span
+                className="creator-avatar-dot"
+                style={{ backgroundColor: currentUser.avatarColor }}
+              >
+                {currentUser.avatarEmoji}
+              </span>
+              <div>
+                <strong>@{currentUser.username}</strong>
+                <small style={{ display: 'block', color: 'var(--muted)', fontSize: 11 }}>
+                  UID: {currentUser.id.slice(0, 14)}...
+                </small>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="tbtn"
+              onClick={async () => {
+                await onLogout();
+                onClose();
+              }}
+            >
+              <LogOut size={13} /> Sign Out
+            </button>
+          </div>
+        )}
 
         {/* Mode Switcher */}
         <div className="seg" style={{ width: '100%', marginBottom: 16 }}>
@@ -98,6 +151,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             onClick={() => {
               setTab('login');
               setErrorMsg(null);
+              setSuccessMsg(null);
             }}
           >
             <LogIn size={13} /> Sign In
@@ -109,22 +163,36 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             onClick={() => {
               setTab('signup');
               setErrorMsg(null);
+              setSuccessMsg(null);
             }}
           >
-            <UserPlus size={13} /> Create Account
+            <UserPlus size={13} /> Register
+          </button>
+          <button
+            type="button"
+            style={{ flex: 1, justifyContent: 'center' }}
+            aria-pressed={tab === 'reset'}
+            onClick={() => {
+              setTab('reset');
+              setErrorMsg(null);
+              setSuccessMsg(null);
+            }}
+          >
+            <KeyRound size={13} /> Reset
           </button>
         </div>
 
-        {/* Google 1-Click Button */}
-        <button
-          type="button"
-          className="btn"
-          style={{ width: '100%', justifyContent: 'center', marginBottom: 14 }}
-          onClick={handleGoogle}
-          disabled={isLoading}
-        >
-          <span>🌐</span> Continue with Google {isFirebaseActive ? '(Firebase Auth)' : ''}
-        </button>
+        {tab !== 'reset' && (
+          <button
+            type="button"
+            className="btn"
+            style={{ width: '100%', justifyContent: 'center', marginBottom: 14 }}
+            onClick={handleGoogle}
+            disabled={isLoading}
+          >
+            <span>🌐</span> Continue with Google (Firebase Auth)
+          </button>
+        )}
 
         <form onSubmit={handleSubmit}>
           {tab === 'signup' && (
@@ -142,33 +210,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           )}
 
           <div className="form-group">
-            <label className="form-label">
-              {tab === 'login' ? 'Email or @Username' : 'Email Address'}
-            </label>
+            <label className="form-label">Email Address</label>
             <input
-              type={tab === 'signup' ? 'email' : 'text'}
+              type="email"
               className="text-input"
-              placeholder={tab === 'login' ? 'you@example.com or @username' : 'you@example.com'}
+              placeholder="you@example.com"
               value={email}
               onChange={(e) => {
                 setEmail(e.target.value);
-                if (tab === 'login') setUsername(e.target.value);
+                if (tab === 'login' && !username) setUsername(e.target.value.split('@')[0]);
               }}
               required
             />
           </div>
 
-          <div className="form-group">
-            <label className="form-label">Password</label>
-            <input
-              type="password"
-              className="text-input"
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </div>
+          {tab !== 'reset' && (
+            <div className="form-group">
+              <label className="form-label">Password (min 6 chars)</label>
+              <input
+                type="password"
+                className="text-input"
+                placeholder="••••••••"
+                minLength={6}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
+          )}
 
           {tab === 'signup' && (
             <>
@@ -211,20 +280,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {errorMsg}
             </p>
           )}
+          {successMsg && (
+            <p className="msg" style={{ color: 'var(--good)', marginBottom: 10 }}>
+              {successMsg}
+            </p>
+          )}
 
           <button type="submit" className="go" disabled={isLoading}>
             {isLoading
-              ? 'Authenticating...'
+              ? 'Processing...'
               : tab === 'login'
-                ? 'Sign In & Join Global Wall'
-                : 'Create Account & Start Playing'}
+                ? 'Sign In with Email'
+                : tab === 'signup'
+                  ? 'Register Account & Play'
+                  : 'Send Password Reset Email'}
           </button>
         </form>
 
-        {/* Quick-switch existing profiles */}
         <div style={{ marginTop: 18, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span className="form-label">Quick-Switch Player</span>
+            <span className="form-label">Firebase Project: dotwall-13046</span>
             <button
               type="button"
               className="mini-link-btn"
@@ -233,29 +308,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 onOpenCloudConfig();
               }}
             >
-              🔥 Connect Firebase API
+              🔥 Database &amp; Auth Status
             </button>
-          </div>
-          <div className="quick-users-list">
-            {users.slice(0, 5).map((u) => (
-              <button
-                key={u.id}
-                type="button"
-                className="creator-chip"
-                onClick={async () => {
-                  await onLogin({ mode: 'login', username: u.username });
-                  onClose();
-                }}
-              >
-                <span
-                  className="creator-avatar-dot"
-                  style={{ backgroundColor: u.avatarColor }}
-                >
-                  {u.avatarEmoji}
-                </span>
-                <span>@{u.username}</span>
-              </button>
-            ))}
           </div>
         </div>
       </div>

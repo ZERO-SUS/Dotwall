@@ -6,17 +6,23 @@ import {
   Grid,
   Hand,
   LocateFixed,
-  Lock,
+  Maximize2,
+  Minimize2,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   Pipette,
+  Redo2,
   Shuffle,
   Sparkles,
+  Undo2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import type { CanvasTool, GlobalPixel, GlobalStats, PixelHistoryEntry, PlayerProfile } from '../types';
 import { CANVAS_SIZE, COOLDOWN_SECONDS, DOTWALL_PALETTE, getColorName } from '../constants';
 import { exportGlobalCanvasPng } from '../utils/exportPng';
+import { getVisibleChunkIds } from '../firebase/database';
 
 interface GlobalCanvasWorkspaceProps {
   pixelsMap: Map<string, GlobalPixel>;
@@ -26,7 +32,10 @@ interface GlobalCanvasWorkspaceProps {
   cooldownRemainingMs: number;
   nextCooldownAt: number;
   onPlacePixel: (x: number, y: number, color: string) => Promise<{ ok: boolean; error?: string }>;
+  onUndoPixel?: () => Promise<{ ok: boolean; error?: string; x?: number; y?: number }>;
+  onRedoPixel?: () => Promise<{ ok: boolean; error?: string; x?: number; y?: number }>;
   onInspectPlayer: (username: string) => void;
+  onVisibleChunksChange?: (chunkIds: string[]) => void;
   compactMode?: boolean;
 }
 
@@ -38,13 +47,15 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   cooldownRemainingMs,
   nextCooldownAt,
   onPlacePixel,
+  onUndoPixel,
+  onRedoPixel,
   onInspectPlayer,
+  onVisibleChunksChange,
   compactMode = false,
 }) => {
   const [selectedCoord, setSelectedCoord] = useState<{ x: number; y: number }>({ x: 490, y: 490 });
   const [hoverCoord, setHoverCoord] = useState<{ x: number; y: number } | null>(null);
 
-  // Active tool & modes (Permanent Ink rule: Place/Modify, Eyedropper, Pan)
   const [tool, setTool] = useState<CanvasTool>('place');
   const [selectedColor, setSelectedColor] = useState<string>('#6B3DFF');
   const [customHexInput, setCustomHexInput] = useState<string>('#6B3DFF');
@@ -61,30 +72,36 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   const [instantPlaceOnClick, setInstantPlaceOnClick] = useState<boolean>(false);
   const [exportWithGrid, setExportWithGrid] = useState<boolean>(false);
 
+  // Expanded & Fullscreen & Collapsible Inspector Panel states (Section 7)
+  const [isInspectorCollapsed, setIsInspectorCollapsed] = useState<boolean>(false);
+  const [isExpandedWorkspace, setIsExpandedWorkspace] = useState<boolean>(false);
+  const [isNativeFullscreen, setIsNativeFullscreen] = useState<boolean>(false);
+
   // Replay state
   const [isReplaying, setIsReplaying] = useState<boolean>(false);
   const [replayIndex, setReplayIndex] = useState<number>(0);
 
   // Viewport transform
-  const [zoom, setZoom] = useState<number>(12);
+  const [zoom, setZoom] = useState<number>(13);
   const [camera, setCamera] = useState<{ x: number; y: number }>({ x: 500, y: 495 });
 
   // Jump inputs
   const [jumpX, setJumpX] = useState<string>('500');
   const [jumpY, setJumpY] = useState<string>('495');
 
-  // Action feedback message
   const [statusMsg, setStatusMsg] = useState<{ text: string; kind: 'info' | 'error' | 'good' }>({
-    text: 'Permanent Ink Rule: Placed pixels cannot be removed — place on empty slots or modify upon existing pixels!',
+    text: 'Select a coordinate and press Enter or Place Pixel.',
     kind: 'info',
   });
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  // Canvas refs
+  // Refs
+  const workspaceRootRef = useRef<HTMLDivElement | null>(null);
   const mainCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const minimapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Pointer & Pinch-to-Zoom tracking
   const dragStateRef = useRef<{
     isDown: boolean;
     hasDragged: boolean;
@@ -100,6 +117,39 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     startCamX: 500,
     startCamY: 495,
   });
+
+  const pinchDistRef = useRef<number | null>(null);
+
+  // Notify parent of visible 50x50 spatial chunks when camera/zoom changes
+  useEffect(() => {
+    if (!onVisibleChunksChange) return;
+    const chunkIds = getVisibleChunkIds(camera.x, camera.y, 1100, 760, zoom);
+    onVisibleChunksChange(chunkIds);
+  }, [camera.x, camera.y, zoom, onVisibleChunksChange]);
+
+  // Listen for native fullscreen change
+  useEffect(() => {
+    const onFsChange = () => {
+      setIsNativeFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  const toggleNativeFullscreen = useCallback(async () => {
+    const el = workspaceRootRef.current;
+    if (!el) return;
+    try {
+      if (!document.fullscreenElement) {
+        await el.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Fallback to expanded workspace mode if browser blocks fullscreen
+      setIsExpandedWorkspace((v) => !v);
+    }
+  }, []);
 
   // Maintain 1000x1000 offscreen backing canvas
   useEffect(() => {
@@ -155,9 +205,12 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     const height = canvas.height;
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    const emptyBg = isDark ? '#24222E' : '#ECEAF3';
+    const customCellEmpty = getComputedStyle(document.documentElement)
+      .getPropertyValue('--cell-empty')
+      .trim();
+    const emptyBg = customCellEmpty || (isDark ? '#24222E' : '#ECEAF3');
     const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(22, 21, 29, 0.09)';
-    const majorGridColor = isDark ? 'rgba(160, 139, 255, 0.18)' : 'rgba(91, 52, 240, 0.16)';
+    const majorGridColor = isDark ? 'rgba(160, 139, 255, 0.2)' : 'rgba(91, 52, 240, 0.18)';
 
     ctx.fillStyle = isDark ? '#121118' : '#E2DFEC';
     ctx.fillRect(0, 0, width, height);
@@ -196,6 +249,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
         ctx.stroke();
       }
 
+      // 50x50 Chunk boundaries or 10x10 guides
       const step = zoom >= 4 ? 10 : 50;
       ctx.strokeStyle = majorGridColor;
       ctx.lineWidth = 1;
@@ -297,13 +351,19 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     history,
     isReplaying,
     replayIndex,
+    isExpandedWorkspace,
+    isInspectorCollapsed,
+    isNativeFullscreen,
   ]);
 
+  // Accurate 1000x1000 coordinate mapping across any zoom, pan, DPR, or screen size
   const screenToBoardCoord = useCallback(
     (clientX: number, clientY: number) => {
       const canvas = mainCanvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+
       const scaleX = canvas.width / rect.width;
       const scaleY = canvas.height / rect.height;
 
@@ -336,7 +396,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
       if (isSubmitting) return;
       if (cooldownRemainingMs > 0) {
         setStatusMsg({
-          text: `Cooldown active! Wait ${(cooldownRemainingMs / 1000).toFixed(1)}s before placing or modifying a pixel.`,
+          text: `Cooldown active! Wait ${(cooldownRemainingMs / 1000).toFixed(1)}s before placing your next pixel.`,
           kind: 'error',
         });
         return;
@@ -350,13 +410,13 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
         selectColorWithHistory(selectedColor);
         setStatusMsg({
           text: existing
-            ? `Modified (${targetX}, ${targetY}) with ${getColorName(selectedColor)} (${selectedColor})! (0 new slots used)`
-            : `Placed permanent pixel ${getColorName(selectedColor)} at (${targetX}, ${targetY})!`,
+            ? `Replaced (${targetX}, ${targetY}) with ${getColorName(selectedColor)} (${selectedColor})! (0 new slots used)`
+            : `Placed ${getColorName(selectedColor)} (${selectedColor}) at (${targetX}, ${targetY})!`,
           kind: 'good',
         });
       } else {
         setStatusMsg({
-          text: res.error || 'Could not place pixel.',
+          text: res.error || 'Placement rejected.',
           kind: 'error',
         });
       }
@@ -373,6 +433,45 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     ]
   );
 
+  const handleUndo = useCallback(async () => {
+    if (!onUndoPixel || isSubmitting) return;
+    setIsSubmitting(true);
+    const res = await onUndoPixel();
+    setIsSubmitting(false);
+    if (res.ok) {
+      if (res.x !== undefined && res.y !== undefined) {
+        setSelectedCoord({ x: res.x, y: res.y });
+      }
+      setStatusMsg({
+        text: `Undid your recent placement at (${res.x}, ${res.y}).`,
+        kind: 'good',
+      });
+    } else {
+      setStatusMsg({
+        text: res.error || 'No eligible own placement to undo.',
+        kind: 'error',
+      });
+    }
+  }, [onUndoPixel, isSubmitting]);
+
+  const handleRedo = useCallback(async () => {
+    if (!onRedoPixel || isSubmitting) return;
+    setIsSubmitting(true);
+    const res = await onRedoPixel();
+    setIsSubmitting(false);
+    if (res.ok) {
+      setStatusMsg({
+        text: `Redid placement at (${res.x}, ${res.y}).`,
+        kind: 'good',
+      });
+    } else {
+      setStatusMsg({
+        text: res.error || 'Nothing safe to redo.',
+        kind: 'error',
+      });
+    }
+  }, [onRedoPixel, isSubmitting]);
+
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
     dragStateRef.current = {
@@ -386,6 +485,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (pinchDistRef.current !== null) return;
     const d = dragStateRef.current;
     if (d.isDown) {
       const dx = e.clientX - d.startX;
@@ -414,7 +514,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const d = dragStateRef.current;
     d.isDown = false;
-    if (d.hasDragged) return;
+    if (d.hasDragged || pinchDistRef.current !== null) return;
 
     const coord = screenToBoardCoord(e.clientX, e.clientY);
     if (!coord) return;
@@ -442,6 +542,32 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     } else if (tool === 'place' && instantPlaceOnClick && cooldownRemainingMs <= 0) {
       handleCommitPlace(coord.x, coord.y);
     }
+  };
+
+  // Mobile Two-Finger Pinch-to-Zoom Support
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      pinchDistRef.current = Math.hypot(dx, dy);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 2 && pinchDistRef.current !== null) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      const ratio = dist / Math.max(10, pinchDistRef.current);
+      if (Math.abs(ratio - 1) > 0.03) {
+        setZoom((z) => Math.max(0.65, Math.min(36, Number((z * ratio).toFixed(2)))));
+        pinchDistRef.current = dist;
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    pinchDistRef.current = null;
   };
 
   useEffect(() => {
@@ -536,9 +662,18 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     } else if (e.key.toLowerCase() === 'h') {
       e.preventDefault();
       setShowHeatmap((h) => !h);
+    } else if (e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      toggleNativeFullscreen();
     } else if (e.key.toLowerCase() === 'r') {
       e.preventDefault();
       jumpToRandomArtworkLocation();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      handleUndo();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      handleRedo();
     } else if (e.key === '+' || e.key === '=') {
       e.preventDefault();
       setZoom((z) => Math.min(36, Number((z * 1.25).toFixed(2))));
@@ -571,22 +706,32 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     });
   }, [cooldownRemainingMs, nextCooldownAt]);
 
+  const canvasPixelWidth = isExpandedWorkspace || isInspectorCollapsed || isNativeFullscreen ? 1360 : 1040;
+  const canvasPixelHeight = isNativeFullscreen ? 860 : compactMode ? 680 : 760;
+
   return (
-    <div className="grid" id="wall" onKeyDown={handleKeyDown}>
-      {/* LEFT STAGE: 1000x1000 Global Canvas */}
+    <div
+      ref={workspaceRootRef}
+      className={`grid ${isInspectorCollapsed ? 'collapsed-rail' : ''} ${
+        isExpandedWorkspace ? 'expanded-workspace' : ''
+      } ${isNativeFullscreen ? 'fullscreen-workspace' : ''}`}
+      id="wall"
+      onKeyDown={handleKeyDown}
+    >
+      {/* LEFT STAGE: Large 1000x1000 Global Canvas */}
       <section className="stage" aria-label="1000 by 1000 Global Pixel Wall">
         <div className="bar">
           <div className="readout">
-            <span className="genz-pill daily" title="Once placed, pixels cannot be removed or undone — only modified upon!">
-              <Lock size={11} /> PERMANENT INK · MODIFY ONLY
+            <span className="genz-pill accent">
+              CHUNK {Math.floor(selectedCoord.x / 50)}_{Math.floor(selectedCoord.y / 50)}
             </span>
             <b id="coord">
               ({selectedCoord.x}, {selectedCoord.y})
             </b>
             <span className="sub" id="owner">
               {inspectedPixel
-                ? `Occupied by @${inspectedPixel.ownerUsername} (v${inspectedPixel.version}) — Paint over to modify!`
-                : 'Empty slot — placing here permanently claims 1 global slot'}
+                ? `Owned by @${inspectedPixel.ownerUsername} (v${inspectedPixel.version}) · ${getColorName(inspectedPixel.color)}`
+                : 'Empty slot — placing here claims 1 of 1,000,000 positions'}
             </span>
           </div>
           <div className="hover" id="hoverInfo">
@@ -596,7 +741,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                 {hoveredPixel ? ` · @${hoveredPixel.ownerUsername}` : ' · Empty'}
               </>
             ) : (
-              'Drag to pan · Scroll to zoom'
+              'Pinch or scroll to zoom · Drag to pan'
             )}
           </div>
         </div>
@@ -608,9 +753,9 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
               type="button"
               aria-pressed={tool === 'place'}
               onClick={() => setTool('place')}
-              title="Place or Modify Pixel Tool (P)"
+              title="Place / Replace Pixel Tool (P)"
             >
-              <Sparkles size={13} /> Place / Modify
+              <Sparkles size={13} /> Place
             </button>
             <button
               type="button"
@@ -629,6 +774,27 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
               <Hand size={13} /> Pan
             </button>
           </div>
+
+          {onUndoPixel && (
+            <div className="seg" role="group" aria-label="Safe History">
+              <button
+                type="button"
+                onClick={handleUndo}
+                title="Undo own recent placement if not modified by another player (Ctrl+Z)"
+              >
+                <Undo2 size={13} /> Undo
+              </button>
+              {onRedoPixel && (
+                <button
+                  type="button"
+                  onClick={handleRedo}
+                  title="Redo placement when safe (Ctrl+Y)"
+                >
+                  <Redo2 size={13} /> Redo
+                </button>
+              )}
+            </div>
+          )}
 
           <button
             type="button"
@@ -669,7 +835,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
             onClick={jumpToRandomArtworkLocation}
             title="Teleport to random pixel art on the canvas (R)"
           >
-            <Shuffle size={13} /> Random Spot
+            <Shuffle size={13} /> Random
           </button>
 
           <div className="seg" role="group" aria-label="Zoom Controls">
@@ -684,7 +850,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
               type="button"
               onClick={() => {
                 setCamera({ x: 500, y: 495 });
-                setZoom(12);
+                setZoom(13);
               }}
               title="Reset Zoom to Central Plaza"
             >
@@ -698,32 +864,71 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
               <ZoomIn size={13} />
             </button>
           </div>
+
+          {/* Fullscreen & Collapsible Panel Controls */}
+          <div className="seg" style={{ marginLeft: 'auto' }}>
+            <button
+              type="button"
+              aria-pressed={isExpandedWorkspace}
+              onClick={() => setIsExpandedWorkspace((v) => !v)}
+              title="Toggle Wide Expanded Canvas Workspace"
+            >
+              {isExpandedWorkspace ? <Minimize2 size={13} /> : <Maximize2 size={13} />} Wide
+            </button>
+            <button
+              type="button"
+              aria-pressed={isNativeFullscreen}
+              onClick={toggleNativeFullscreen}
+              title="Fullscreen Canvas Mode (F)"
+            >
+              <Maximize2 size={13} /> Fullscreen
+            </button>
+            <button
+              type="button"
+              aria-pressed={isInspectorCollapsed}
+              onClick={() => setIsInspectorCollapsed((c) => !c)}
+              title={isInspectorCollapsed ? 'Show Inspector Panel' : 'Hide Inspector Panel'}
+            >
+              {isInspectorCollapsed ? (
+                <>
+                  <PanelRightOpen size={13} /> Show Tools
+                </>
+              ) : (
+                <>
+                  <PanelRightClose size={13} /> Hide Panel
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Canvas Viewport Container */}
-        <div className="board-container">
+        <div className="board-container large-board">
           <div
             className="board"
             id="board"
             data-tool={tool}
             tabIndex={0}
             role="application"
-            aria-label="Global 1000 by 1000 pixel canvas. Arrow keys move selection, Enter places or modifies pixel."
+            aria-label="Global 1000 by 1000 pixel canvas. Arrow keys move selection, Enter places pixel."
           >
             <canvas
               ref={mainCanvasRef}
-              width={760}
-              height={compactMode ? 540 : 660}
+              width={canvasPixelWidth}
+              height={canvasPixelHeight}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerLeave={() => setHoverCoord(null)}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
               onDoubleClick={() => {
                 if (tool === 'place') handleCommitPlace();
               }}
             />
 
-            {/* Floating Minimap HUD & Quick Teleport */}
+            {/* Floating Minimap HUD */}
             <div className="minimap-hud">
               <div className="minimap-header">
                 <span>MINIMAP (1000×1000)</span>
@@ -733,7 +938,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                   onClick={() => {
                     setCamera({ x: 500, y: 495 });
                     setSelectedCoord({ x: 500, y: 495 });
-                    if (zoom < 8) setZoom(12);
+                    if (zoom < 8) setZoom(13);
                   }}
                   title="Jump to Central Plaza (500, 495)"
                 >
@@ -742,8 +947,8 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
               </div>
               <canvas
                 ref={minimapCanvasRef}
-                width={148}
-                height={148}
+                width={156}
+                height={156}
                 className="minimap-canvas"
                 onClick={handleMinimapInteract}
                 onMouseMove={(e) => {
@@ -751,6 +956,28 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                 }}
               />
             </div>
+
+            {/* Floating Quick Place Pill when Inspector is Collapsed or in Fullscreen */}
+            {(isInspectorCollapsed || isNativeFullscreen) && (
+              <div className="floating-quick-place-dock">
+                <input
+                  type="color"
+                  value={selectedColor}
+                  onChange={(e) => selectColorWithHistory(e.target.value)}
+                  className="native-color-input"
+                />
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={cooldownRemainingMs > 0 || isSubmitting}
+                  onClick={() => handleCommitPlace()}
+                >
+                  {cooldownRemainingMs > 0
+                    ? `Wait ${cooldownSecondsDisplay}s`
+                    : `Place (${selectedCoord.x}, ${selectedCoord.y})`}
+                </button>
+              </div>
+            )}
 
             {/* Floating Bottom HUD Bar */}
             <div className="canvas-bottom-hud">
@@ -796,7 +1023,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                   checked={instantPlaceOnClick}
                   onChange={(e) => setInstantPlaceOnClick(e.target.checked)}
                 />
-                <span>1-Click Place/Modify</span>
+                <span>1-Click Place</span>
               </label>
             </div>
           </div>
@@ -805,8 +1032,8 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
         {/* Export & Canvas Footer Row */}
         <div className="canvas-footer-bar">
           <p className="note">
-            Rule: Once placed, pixels cannot be removed or undone — double-click or press{' '}
-            <kbd>Enter</kbd> to place or modify upon existing pixels!
+            Tip: Double-click any cell or press <kbd>Enter</kbd> to place · Press <kbd>F</kbd> for
+            fullscreen · Hide the side panel anytime for a distraction-free studio.
           </p>
           <div className="export-controls">
             <label className="export-grid-check">
@@ -853,247 +1080,249 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
         </div>
       </section>
 
-      {/* RIGHT RAIL: 320px Control Panel */}
-      <aside className="panel" aria-label="Pixel controls and inspector">
-        {/* 1. 30-SECOND COOLDOWN & PLACEMENT CARD */}
-        <div className="card">
-          <h2>
-            <span>Placement Charge</span>
-            <span className="pick">30s Cooldown</span>
-          </h2>
-          <div className="charge">
-            <div className="ring" aria-hidden="true">
-              <svg viewBox="0 0 72 72">
-                <circle className="bg" cx="36" cy="36" r="30" />
-                <circle
-                  className="fg"
-                  cx="36"
-                  cy="36"
-                  r="30"
-                  strokeDasharray={circumference}
-                  strokeDashoffset={strokeDashoffset}
-                />
-                <text className="rt" x="36" y="41">
-                  {cooldownRemainingMs > 0 ? `${cooldownSecondsDisplay}s` : 'GO'}
-                </text>
-              </svg>
-            </div>
-            <div>
-              <div className="state">
-                {cooldownRemainingMs > 0
-                  ? `Recharging...`
-                  : inspectedPixel
-                    ? 'Ready to Modify'
-                    : 'Ready to Place'}
+      {/* RIGHT RAIL: Collapsible 330px Control Panel */}
+      {!isInspectorCollapsed && (
+        <aside className="panel" aria-label="Pixel controls and inspector">
+          {/* 1. 30-SECOND COOLDOWN & PLACEMENT CARD */}
+          <div className="card">
+            <h2>
+              <span>Placement Charge</span>
+              <span className="pick">30s UID Cooldown</span>
+            </h2>
+            <div className="charge">
+              <div className="ring" aria-hidden="true">
+                <svg viewBox="0 0 72 72">
+                  <circle className="bg" cx="36" cy="36" r="30" />
+                  <circle
+                    className="fg"
+                    cx="36"
+                    cy="36"
+                    r="30"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={strokeDashoffset}
+                  />
+                  <text className="rt" x="36" y="41">
+                    {cooldownRemainingMs > 0 ? `${cooldownSecondsDisplay}s` : 'GO'}
+                  </text>
+                </svg>
               </div>
-              <div className="hint">
-                {cooldownRemainingMs > 0
-                  ? `Next available at ${nextAvailableTimeString}`
-                  : `Target (${selectedCoord.x}, ${selectedCoord.y}) selected`}
-              </div>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="go"
-            disabled={cooldownRemainingMs > 0 || isSubmitting}
-            onClick={() => handleCommitPlace()}
-          >
-            {cooldownRemainingMs > 0
-              ? `Next pixel in ${cooldownSecondsDisplay}s`
-              : inspectedPixel
-                ? `Modify (${selectedCoord.x}, ${selectedCoord.y}) with ${getColorName(selectedColor)}`
-                : `Place ${getColorName(selectedColor)} at (${selectedCoord.x}, ${selectedCoord.y})`}
-          </button>
-
-          <p className="msg" data-kind={statusMsg.kind === 'error' ? 'error' : undefined}>
-            {statusMsg.text}
-          </p>
-
-          <div className="mine">
-            <span>
-              Your pixels: <b>{currentUser?.pixelsPlaced ?? 0}</b>
-            </span>
-            <span>
-              Slots left: <b>{stats.pixelsRemaining.toLocaleString()}</b>
-            </span>
-          </div>
-        </div>
-
-        {/* 2. COLOR PALETTE & HEX PICKER CARD */}
-        <div className="card">
-          <h2>
-            <span>Color Palette</span>
-            <span className="pick">
-              {getColorName(selectedColor)} · {selectedColor}
-            </span>
-          </h2>
-          <div className="swatches" role="radiogroup" aria-label="Color swatches">
-            {DOTWALL_PALETTE.map((sw) => (
-              <button
-                key={sw.hex}
-                type="button"
-                className="sw"
-                style={{ backgroundColor: sw.hex }}
-                aria-pressed={selectedColor.toUpperCase() === sw.hex.toUpperCase()}
-                aria-label={`${sw.name} ${sw.hex}`}
-                title={`${sw.name} (${sw.hex})`}
-                onClick={() => {
-                  selectColorWithHistory(sw.hex);
-                  if (tool === 'pick') setTool('place');
-                }}
-              />
-            ))}
-          </div>
-
-          <div className="hex-picker-row">
-            <input
-              type="color"
-              value={selectedColor}
-              onChange={(e) => selectColorWithHistory(e.target.value)}
-              className="native-color-input"
-              title="Open custom color wheel"
-            />
-            <input
-              type="text"
-              value={customHexInput}
-              maxLength={7}
-              placeholder="#6B3DFF"
-              onChange={(e) => {
-                const v = e.target.value;
-                setCustomHexInput(v);
-                if (/^#[0-9A-Fa-f]{6}$/.test(v)) {
-                  setSelectedColor(v.toUpperCase());
-                }
-              }}
-              className="hex-text-input"
-              aria-label="Custom HEX color"
-            />
-            <span className="hex-badge">HEX</span>
-          </div>
-
-          <div className="recent">
-            <span>Recent:</span>
-            {recentColors.map((hex) => (
-              <button
-                key={hex}
-                type="button"
-                className="sw"
-                style={{ backgroundColor: hex }}
-                aria-pressed={selectedColor === hex}
-                onClick={() => selectColorWithHistory(hex)}
-                title={`Recent color ${hex}`}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* 3. PIXEL INSPECTOR CARD */}
-        <div className="card">
-          <h2>
-            <span>Pixel Inspector</span>
-            <span className="pick">
-              ({selectedCoord.x}, {selectedCoord.y})
-            </span>
-          </h2>
-          {inspectedPixel ? (
-            <>
-              <div className="insp-top">
-                <div className="insp-sw" style={{ backgroundColor: inspectedPixel.color }} />
-                <div>
-                  <div className="insp-name">{getColorName(inspectedPixel.color)}</div>
-                  <div className="insp-hex">
-                    {inspectedPixel.color} · Modified v{inspectedPixel.version}
-                  </div>
+              <div>
+                <div className="state">
+                  {cooldownRemainingMs > 0
+                    ? `Recharging...`
+                    : inspectedPixel
+                      ? 'Ready to Replace'
+                      : 'Ready to Place'}
+                </div>
+                <div className="hint">
+                  {cooldownRemainingMs > 0
+                    ? `Next available at ${nextAvailableTimeString}`
+                    : `Target (${selectedCoord.x}, ${selectedCoord.y}) selected`}
                 </div>
               </div>
-              <dl className="rows">
-                <dt>Last Modified By</dt>
-                <dd>
-                  <button
-                    type="button"
-                    className="inline-user-link"
-                    onClick={() => onInspectPlayer(inspectedPixel.ownerUsername)}
-                  >
-                    @{inspectedPixel.ownerUsername}
-                  </button>
-                </dd>
-                <dt>Position</dt>
-                <dd>
-                  X: {inspectedPixel.x}, Y: {inspectedPixel.y}
-                </dd>
-                <dt>Updated</dt>
-                <dd>{new Date(inspectedPixel.updatedAt).toLocaleTimeString()}</dd>
-                <dt>Permanent Rule</dt>
-                <dd>Cannot be removed — can only be modified with a new color!</dd>
-              </dl>
-              <div className="insp-actions">
-                <button
-                  type="button"
-                  className="insp-use"
-                  onClick={() => selectColorWithHistory(inspectedPixel.color)}
-                >
-                  Copy Color ({inspectedPixel.color})
-                </button>
-              </div>
-            </>
-          ) : (
-            <div>
-              <p className="empty-line">
-                Slot <b>({selectedCoord.x}, {selectedCoord.y})</b> is empty. Placing a pixel here
-                permanently claims 1 of the {stats.pixelsRemaining.toLocaleString()} remaining global
-                slots!
-              </p>
             </div>
-          )}
-        </div>
 
-        {/* 4. LIVE WALL FEED CARD */}
-        <div className="card">
-          <h3>
-            <span>Live Wall Feed</span>
-            <span>{history.length} events</span>
-          </h3>
-          <ul className="feed">
-            {history
-              .slice(-7)
-              .reverse()
-              .map((item) => (
-                <li key={item.id}>
-                  <span
-                    className="sq"
-                    style={{ backgroundColor: item.newColor || '#ECEAF3' }}
-                  />
-                  <span className="feed-text">
+            <button
+              type="button"
+              className="go"
+              disabled={cooldownRemainingMs > 0 || isSubmitting}
+              onClick={() => handleCommitPlace()}
+            >
+              {cooldownRemainingMs > 0
+                ? `Next pixel in ${cooldownSecondsDisplay}s`
+                : inspectedPixel
+                  ? `Replace (${selectedCoord.x}, ${selectedCoord.y}) with ${getColorName(selectedColor)}`
+                  : `Place ${getColorName(selectedColor)} at (${selectedCoord.x}, ${selectedCoord.y})`}
+            </button>
+
+            <p className="msg" data-kind={statusMsg.kind === 'error' ? 'error' : undefined}>
+              {statusMsg.text}
+            </p>
+
+            <div className="mine">
+              <span>
+                Your pixels: <b>{currentUser?.pixelsPlaced ?? 0}</b>
+              </span>
+              <span>
+                Slots left: <b>{stats.pixelsRemaining.toLocaleString()}</b>
+              </span>
+            </div>
+          </div>
+
+          {/* 2. COLOR PALETTE & HEX PICKER CARD */}
+          <div className="card">
+            <h2>
+              <span>Color Palette</span>
+              <span className="pick">
+                {getColorName(selectedColor)} · {selectedColor}
+              </span>
+            </h2>
+            <div className="swatches" role="radiogroup" aria-label="Color swatches">
+              {DOTWALL_PALETTE.map((sw) => (
+                <button
+                  key={sw.hex}
+                  type="button"
+                  className="sw"
+                  style={{ backgroundColor: sw.hex }}
+                  aria-pressed={selectedColor.toUpperCase() === sw.hex.toUpperCase()}
+                  aria-label={`${sw.name} ${sw.hex}`}
+                  title={`${sw.name} (${sw.hex})`}
+                  onClick={() => {
+                    selectColorWithHistory(sw.hex);
+                    if (tool === 'pick') setTool('place');
+                  }}
+                />
+              ))}
+            </div>
+
+            <div className="hex-picker-row">
+              <input
+                type="color"
+                value={selectedColor}
+                onChange={(e) => selectColorWithHistory(e.target.value)}
+                className="native-color-input"
+                title="Open custom color wheel"
+              />
+              <input
+                type="text"
+                value={customHexInput}
+                maxLength={7}
+                placeholder="#6B3DFF"
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setCustomHexInput(v);
+                  if (/^#[0-9A-Fa-f]{6}$/.test(v)) {
+                    setSelectedColor(v.toUpperCase());
+                  }
+                }}
+                className="hex-text-input"
+                aria-label="Custom HEX color"
+              />
+              <span className="hex-badge">HEX</span>
+            </div>
+
+            <div className="recent">
+              <span>Recent:</span>
+              {recentColors.map((hex) => (
+                <button
+                  key={hex}
+                  type="button"
+                  className="sw"
+                  style={{ backgroundColor: hex }}
+                  aria-pressed={selectedColor === hex}
+                  onClick={() => selectColorWithHistory(hex)}
+                  title={`Recent color ${hex}`}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* 3. PIXEL INSPECTOR CARD */}
+          <div className="card">
+            <h2>
+              <span>Pixel Inspector</span>
+              <span className="pick">
+                ({selectedCoord.x}, {selectedCoord.y})
+              </span>
+            </h2>
+            {inspectedPixel ? (
+              <>
+                <div className="insp-top">
+                  <div className="insp-sw" style={{ backgroundColor: inspectedPixel.color }} />
+                  <div>
+                    <div className="insp-name">{getColorName(inspectedPixel.color)}</div>
+                    <div className="insp-hex">
+                      {inspectedPixel.color} · Version v{inspectedPixel.version}
+                    </div>
+                  </div>
+                </div>
+                <dl className="rows">
+                  <dt>Owner</dt>
+                  <dd>
                     <button
                       type="button"
                       className="inline-user-link"
-                      onClick={() => onInspectPlayer(item.username)}
+                      onClick={() => onInspectPlayer(inspectedPixel.ownerUsername)}
                     >
-                      @{item.username}
-                    </button>{' '}
-                    {item.actionType === 'replace' ? 'modified' : 'placed'}{' '}
-                    <button
-                      type="button"
-                      className="inline-coord-link"
-                      onClick={() => {
-                        setCamera({ x: item.x, y: item.y });
-                        setSelectedCoord({ x: item.x, y: item.y });
-                        if (zoom < 10) setZoom(14);
-                      }}
-                    >
-                      ({item.x}, {item.y})
+                      @{inspectedPixel.ownerUsername}
                     </button>
-                  </span>
-                  <span className="at">
-                    {Math.max(1, Math.round((Date.now() - item.createdAt) / 1000))}s
-                  </span>
-                </li>
-              ))}
-          </ul>
-        </div>
-      </aside>
+                  </dd>
+                  <dt>Chunk</dt>
+                  <dd>
+                    Chunk {Math.floor(inspectedPixel.x / 50)}_{Math.floor(inspectedPixel.y / 50)}
+                  </dd>
+                  <dt>Updated</dt>
+                  <dd>{new Date(inspectedPixel.updatedAt).toLocaleTimeString()}</dd>
+                  <dt>Capacity Rule</dt>
+                  <dd>Replacing consumes 0 new slots</dd>
+                </dl>
+                <div className="insp-actions">
+                  <button
+                    type="button"
+                    className="insp-use"
+                    onClick={() => selectColorWithHistory(inspectedPixel.color)}
+                  >
+                    Copy Color ({inspectedPixel.color})
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div>
+                <p className="empty-line">
+                  Position <b>({selectedCoord.x}, {selectedCoord.y})</b> is empty. Placing a pixel
+                  here claims 1 of the {stats.pixelsRemaining.toLocaleString()} remaining global
+                  slots.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* 4. LIVE WALL FEED CARD */}
+          <div className="card">
+            <h3>
+              <span>Live Wall Feed</span>
+              <span>{history.length} events</span>
+            </h3>
+            <ul className="feed">
+              {history
+                .slice(-7)
+                .reverse()
+                .map((item) => (
+                  <li key={item.id}>
+                    <span
+                      className="sq"
+                      style={{ backgroundColor: item.newColor || '#ECEAF3' }}
+                    />
+                    <span className="feed-text">
+                      <button
+                        type="button"
+                        className="inline-user-link"
+                        onClick={() => onInspectPlayer(item.username)}
+                      >
+                        @{item.username}
+                      </button>{' '}
+                      {item.actionType === 'replace' ? 'replaced' : 'placed'}{' '}
+                      <button
+                        type="button"
+                        className="inline-coord-link"
+                        onClick={() => {
+                          setCamera({ x: item.x, y: item.y });
+                          setSelectedCoord({ x: item.x, y: item.y });
+                          if (zoom < 10) setZoom(14);
+                        }}
+                      >
+                        ({item.x}, {item.y})
+                      </button>
+                    </span>
+                    <span className="at">
+                      {Math.max(1, Math.round((Date.now() - item.createdAt) / 1000))}s
+                    </span>
+                  </li>
+                ))}
+            </ul>
+          </div>
+        </aside>
+      )}
     </div>
   );
 };

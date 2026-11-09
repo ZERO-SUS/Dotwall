@@ -741,6 +741,20 @@ export function dotwallMultiplayerPlugin(): Plugin {
           }
 
           const now = Date.now();
+          const todayUtc = new Date(now).toISOString().slice(0, 10);
+          const alreadyClaimedToday = (db.taskSubmissions as any[]).some(
+            (s: any) =>
+              s.userId === user.id &&
+              s.taskId === task.id &&
+              new Date(s.createdAt).toISOString().slice(0, 10) === todayUtc
+          );
+          if (alreadyClaimedToday) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `You have already claimed today's daily reward (${todayUtc} UTC) for "${task.title}"!`,
+            });
+          }
+
           const accuracyScore = Math.min(100, Math.max(40, Number(body.accuracyScore) || 85));
           const pointsAwarded = task.rewardPoints;
 

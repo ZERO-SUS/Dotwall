@@ -6,3 +6,5 @@ dist-ssr
 .env.local
 .DS_Store
 server/data/dotwall-db.json
+functions/node_modules
+.firebase

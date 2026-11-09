@@ -7,6 +7,7 @@ import {
   LogIn,
   MessageSquare,
   Moon,
+  Paintbrush,
   Palette,
   Search,
   Server,
@@ -32,21 +33,25 @@ import type {
   TaskSubmission,
 } from './types';
 import { COOLDOWN_SECONDS, GLOBAL_CAPACITY } from './constants';
-import { getSupabaseClient, getSupabaseConfig } from './lib/supabase';
+import { getFirebaseAuth, getFirebaseDb } from './firebase/app';
 import {
-  createUserWithEmailAndPassword,
-  fbUpdateProfile,
-  getFirebaseConfig,
-  getFirebaseInstances,
-  GoogleAuthProvider,
-  onDisconnect,
-  onValue,
-  ref,
-  set,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  update,
-} from './lib/firebase';
+  ensurePlayerProfileInDb,
+  formatFirebaseAuthError,
+  loginWithEmail,
+  loginWithGooglePopup,
+  logoutFirebaseUser,
+  onAuthStateChanged,
+  registerWithEmail,
+  sendAccountPasswordReset,
+} from './firebase/auth';
+import { startUserPresenceSession, subscribeToOnlinePlayers } from './firebase/presence';
+import {
+  placePixelInFirebase,
+  submitTaskInFirebase,
+  undoLastPlacementInFirebase,
+} from './firebase/database';
+import { initDotwallAnalytics, trackGameEvent } from './firebase/analytics';
+import { onValue, ref } from 'firebase/database';
 import {
   ACHIEVEMENTS_CATALOG,
   createInitialDatabaseSeed,
@@ -62,29 +67,52 @@ import { GlobalInsightsAndGuide } from './components/GlobalInsightsAndGuide';
 import { PixelArtworkPreview } from './components/PixelArtworkPreview';
 import { BackendConfigModal } from './components/BackendConfigModal';
 import { AuthModal } from './components/AuthModal';
+import {
+  applyAppearanceToDocument,
+  AppearanceSettings,
+  loadAppearanceSettings,
+  ThemeCustomizerModal,
+} from './components/ThemeCustomizerModal';
 
 const USER_ID_STORAGE_KEY = 'dotwall_auth_user_id';
 const STATIC_DB_STORAGE_KEY = 'dotwall_static_global_db_v2';
 const SESSION_ID = `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
+function isLocalhostRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  const h = window.location.hostname;
+  return h === 'localhost' || h === '127.0.0.1';
+}
+
 export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('home');
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = window.localStorage.getItem('dotwall_theme');
-    if (saved === 'dark' || saved === 'light') return saved;
-    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  });
+
+  // Complete Theme & Custom Appearance System
+  const [appearance, setAppearance] = useState<AppearanceSettings>(() => loadAppearanceSettings());
+  const [showThemeModal, setShowThemeModal] = useState<boolean>(false);
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    window.localStorage.setItem('dotwall_theme', theme);
-  }, [theme]);
+    applyAppearanceToDocument(appearance);
+    if (appearance.mode !== 'system' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const listener = () => applyAppearanceToDocument(appearance);
+    mq.addEventListener?.('change', listener);
+    return () => mq.removeEventListener?.('change', listener);
+  }, [appearance]);
+
+  // Initialize Firebase Analytics safely
+  useEffect(() => {
+    initDotwallAnalytics();
+  }, []);
 
   // Multiplayer Connection state
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'warn'>('live');
   const [connectionMode, setConnectionMode] = useState<
     'firebase-cloud' | 'supabase-cloud' | 'local-server' | 'static-global'
-  >('local-server');
+  >('firebase-cloud');
+  const [rtdbStatus, setRtdbStatus] = useState<'connected' | 'permission-denied' | 'connecting'>(
+    'connecting'
+  );
   const [showBackendModal, setShowBackendModal] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
 
@@ -114,6 +142,7 @@ export function App() {
 
   const [serverTimeOffsetMs, setServerTimeOffsetMs] = useState<number>(0);
   const [nowTick, setNowTick] = useState<number>(Date.now());
+  const [visibleChunkIds, setVisibleChunkIds] = useState<string[]>(['9_9', '9_10', '10_9', '10_10']);
 
   const [inspectedUsername, setInspectedUsername] = useState<string | null>(null);
   const [selectedExploreArtwork, setSelectedExploreArtwork] = useState<CommunityArtwork | null>(
@@ -128,7 +157,7 @@ export function App() {
     {
       id: 'notif-welcome',
       title: 'Welcome to Dotwall 1000×1000!',
-      body: 'Permanent Ink Rule: Placed pixels cannot be undone — only modified upon! Clear 5 random objects daily in Pixel Tasks.',
+      body: 'Connected to Firebase (dotwall-13046). Place or modify pixels on the 1M grid and complete your 5 daily objects!',
       icon: '👾',
       timestamp: Date.now(),
       read: false,
@@ -156,7 +185,7 @@ export function App() {
     []
   );
 
-  // Recompute GlobalStats dynamically whenever pixelsMap or users change in static/Firebase mode
+  // Recompute GlobalStats dynamically whenever pixelsMap or users change
   const recomputeStatsFromState = useCallback(
     (
       pxMap: Map<string, GlobalPixel>,
@@ -210,7 +239,44 @@ export function App() {
     prevCooldownRef.current = cooldownRemainingMs;
   }, [cooldownRemainingMs, pushNotification]);
 
-  // Initialize Static Fallback Engine (used on GitHub Pages if local /api is absent and before Firebase keys are entered)
+  // Persist static seed snapshot helper
+  const persistToLocalStore = useCallback(
+    (
+      pxMap: Map<string, GlobalPixel>,
+      usersList: PlayerProfile[],
+      histList: PixelHistoryEntry[],
+      subsList: TaskSubmission[],
+      artsList: CommunityArtwork[],
+      cmtsList: CommunityComment[]
+    ) => {
+      try {
+        const pixelsRecord: Record<string, GlobalPixel> = {};
+        pxMap.forEach((v, k) => {
+          pixelsRecord[k] = v;
+        });
+        const usersRecord: Record<string, PlayerProfile> = {};
+        usersList.forEach((u) => {
+          usersRecord[u.id] = u;
+        });
+        window.localStorage.setItem(
+          STATIC_DB_STORAGE_KEY,
+          JSON.stringify({
+            pixels: pixelsRecord,
+            users: usersRecord,
+            history: histList.slice(-200),
+            taskSubmissions: subsList.slice(0, 100),
+            artworks: artsList,
+            comments: cmtsList,
+          })
+        );
+      } catch {
+        // ignore storage quota errors
+      }
+    },
+    []
+  );
+
+  // Initialize Local/Static State Seed
   const loadOrInitStaticEngine = useCallback(() => {
     let parsed: any = null;
     try {
@@ -264,127 +330,195 @@ export function App() {
     setPixelsMap(map);
     setHistory(seed.history || []);
     setUsers(usersList);
-    setCurrentUser(me);
+    setCurrentUser((prev) => prev || me);
     setTasks(INITIAL_TASKS);
     setTaskSubmissions(seed.taskSubmissions || []);
     setArtworks(seed.artworks || []);
     setComments(seed.comments || []);
     setAchievementsCatalog(ACHIEVEMENTS_CATALOG);
     setStats(recomputeStatsFromState(map, usersList, seed.artworks || [], onlinePresence));
-    setConnectionMode('static-global');
     setConnectionState('live');
   }, [activeTab, recomputeStatsFromState]);
 
-  // Bootstrap Multiplayer Engine (Firebase -> Local API Server -> Static GitHub Pages Engine)
+  // Bootstrap Multiplayer Engine
   const initializeMultiplayer = useCallback(async () => {
     setConnectionState('connecting');
-    const fbCfg = getFirebaseConfig();
-    const fb = getFirebaseInstances();
-    const supaCfg = getSupabaseConfig();
-    const supabase = getSupabaseClient();
+    loadOrInitStaticEngine();
 
-    // 1. Check if Firebase Realtime Database is configured
-    if (fbCfg.isConfigured && fb) {
-      setConnectionMode('firebase-cloud');
-      setConnectionState('live');
-      // Seed initial state locally first, then subscribe to Firebase RTDB
-      loadOrInitStaticEngine();
-      setConnectionMode('firebase-cloud');
+    // Only probe /api/* when running on localhost dev server (never in production on GitHub Pages)
+    if (isLocalhostRuntime()) {
+      try {
+        const savedUserId = window.localStorage.getItem(USER_ID_STORAGE_KEY);
+        const authRes = await fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: savedUserId || undefined }),
+        });
 
-      const pixelsRef = ref(fb.db, 'dotwall/pixels');
-      onValue(pixelsRef, (snapshot) => {
-        const val = snapshot.val();
-        if (val) {
-          setPixelsMap((prev) => {
-            const next = new Map(prev);
-            Object.values(val as Record<string, GlobalPixel>).forEach((p) => {
-              next.set(`${p.x},${p.y}`, p);
-            });
-            return next;
-          });
+        if (authRes.ok) {
+          const authData = await authRes.json();
+          let activeUser: PlayerProfile | null = null;
+          if (authData.ok && authData.user) {
+            activeUser = authData.user;
+            window.localStorage.setItem(USER_ID_STORAGE_KEY, authData.user.id);
+            if (authData.serverTime) {
+              setServerTimeOffsetMs(authData.serverTime - Date.now());
+            }
+            setCurrentUser((prev) => prev || authData.user);
+          }
+
+          const stateRes = await fetch('/api/state');
+          const stateData = await stateRes.json();
+          if (stateData.ok) {
+            const map = new Map<string, GlobalPixel>();
+            for (const px of stateData.pixels as GlobalPixel[]) {
+              map.set(`${px.x},${px.y}`, px);
+            }
+            setPixelsMap(map);
+            setHistory(stateData.history || []);
+            setUsers(stateData.users || []);
+            setTasks(stateData.tasks || INITIAL_TASKS);
+            setTaskSubmissions(stateData.taskSubmissions || []);
+            setArtworks(stateData.artworks || []);
+            setComments(stateData.comments || []);
+            setAchievementsCatalog(stateData.achievementsCatalog || ACHIEVEMENTS_CATALOG);
+            if (stateData.stats) setStats(stateData.stats);
+            if (activeUser) {
+              const freshMe = (stateData.users || []).find(
+                (u: PlayerProfile) => u.id === activeUser!.id
+              );
+              if (freshMe) setCurrentUser(freshMe);
+            }
+            setConnectionMode('local-server');
+            setConnectionState('live');
+          }
         }
-      });
-
-      const presenceRef = ref(fb.db, `dotwall/presence/${SESSION_ID}`);
-      if (currentUser) {
-        set(presenceRef, {
-          userId: currentUser.id,
-          username: currentUser.username,
-          avatarEmoji: currentUser.avatarEmoji,
-          avatarColor: currentUser.avatarColor,
-          activeView: activeTab,
-          lastSeenAt: Date.now(),
-        }).catch(() => {});
-        onDisconnect(presenceRef).remove().catch(() => {});
+      } catch {
+        // Local API not running -> use Firebase + Static Engine
       }
-      return;
     }
-
-    if (supaCfg.isConfigured && supabase) {
-      setConnectionMode('supabase-cloud');
-    }
-
-    // 2. Try connecting to Built-in Local Multiplayer API Server (/api/state)
-    try {
-      const savedUserId = window.localStorage.getItem(USER_ID_STORAGE_KEY);
-      const authRes = await fetch('/api/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: savedUserId || undefined }),
-      });
-
-      if (!authRes.ok) {
-        throw new Error('Static host detected');
-      }
-
-      const authData = await authRes.json();
-      let activeUser: PlayerProfile | null = null;
-      if (authData.ok && authData.user) {
-        activeUser = authData.user;
-        window.localStorage.setItem(USER_ID_STORAGE_KEY, authData.user.id);
-        if (authData.serverTime) {
-          setServerTimeOffsetMs(authData.serverTime - Date.now());
-        }
-        setCurrentUser(authData.user);
-      }
-
-      const stateRes = await fetch('/api/state');
-      const stateData = await stateRes.json();
-      if (stateData.ok) {
-        const map = new Map<string, GlobalPixel>();
-        for (const px of stateData.pixels as GlobalPixel[]) {
-          map.set(`${px.x},${px.y}`, px);
-        }
-        setPixelsMap(map);
-        setHistory(stateData.history || []);
-        setUsers(stateData.users || []);
-        setTasks(stateData.tasks || INITIAL_TASKS);
-        setTaskSubmissions(stateData.taskSubmissions || []);
-        setArtworks(stateData.artworks || []);
-        setComments(stateData.comments || []);
-        setAchievementsCatalog(stateData.achievementsCatalog || ACHIEVEMENTS_CATALOG);
-        if (stateData.stats) setStats(stateData.stats);
-        if (activeUser) {
-          const freshMe = (stateData.users || []).find(
-            (u: PlayerProfile) => u.id === activeUser!.id
-          );
-          if (freshMe) setCurrentUser(freshMe);
-        }
-        setConnectionMode(supaCfg.isConfigured ? 'supabase-cloud' : 'local-server');
-        setConnectionState('live');
-        return;
-      }
-    } catch {
-      // Running on GitHub Pages static host without /api server -> use Static Global Engine + BroadcastChannel!
-      loadOrInitStaticEngine();
-    }
-  }, [activeTab, currentUser, loadOrInitStaticEngine]);
+  }, [loadOrInitStaticEngine]);
 
   useEffect(() => {
     initializeMultiplayer();
   }, []);
 
-  // Multi-tab BroadcastChannel sync for Static Global Engine on GitHub Pages
+  // Subscribe to Firebase Authentication (dotwall-13046) session persistence
+  useEffect(() => {
+    const auth = getFirebaseAuth();
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) return;
+      try {
+        const profile = await ensurePlayerProfileInDb(fbUser);
+        window.localStorage.setItem(USER_ID_STORAGE_KEY, profile.id);
+        setCurrentUser(profile);
+        setUsers((prev) => {
+          const exists = prev.some((u) => u.id === profile.id);
+          return exists ? prev.map((u) => (u.id === profile.id ? profile : u)) : [...prev, profile];
+        });
+      } catch {
+        // Fallback profile directly from Firebase Auth user
+        const cleanHandle = (
+          fbUser.displayName ||
+          fbUser.email?.split('@')[0] ||
+          `pixel_${fbUser.uid.slice(0, 6)}`
+        )
+          .replace(/^@/, '')
+          .replace(/[^a-zA-Z0-9_.-]/g, '')
+          .slice(0, 24);
+        const fallbackProfile: PlayerProfile = {
+          id: fbUser.uid,
+          username: cleanHandle,
+          displayName: fbUser.displayName || cleanHandle,
+          avatarEmoji: '👾',
+          avatarColor: '#6B3DFF',
+          bio: 'Verified Firebase Player on Dotwall 1000×1000.',
+          pixelsPlaced: 0,
+          tasksCompleted: 0,
+          points: 50,
+          lastPixelAt: 0,
+          nextCooldownAt: 0,
+          joinedAt: Date.now(),
+          achievements: [],
+        };
+        window.localStorage.setItem(USER_ID_STORAGE_KEY, fallbackProfile.id);
+        setCurrentUser((prev) => (prev && prev.id === fbUser.uid ? prev : fallbackProfile));
+        setUsers((prev) =>
+          prev.some((u) => u.id === fallbackProfile.id) ? prev : [...prev, fallbackProfile]
+        );
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Subscribe to visible chunks in Firebase Realtime Database (`canvasChunks/{chunkX}_{chunkY}`)
+  useEffect(() => {
+    const db = getFirebaseDb();
+    const unsubscribes: (() => void)[] = [];
+
+    for (const chunkId of visibleChunkIds.slice(0, 36)) {
+      const chunkRef = ref(db, `canvasChunks/${chunkId}`);
+      const unsub = onValue(
+        chunkRef,
+        (snapshot) => {
+          setRtdbStatus('connected');
+          setConnectionMode('firebase-cloud');
+          setConnectionState('live');
+          const val = snapshot.val();
+          if (val && typeof val === 'object') {
+            setPixelsMap((prev) => {
+              const next = new Map(prev);
+              Object.values(val as Record<string, any>).forEach((cell) => {
+                if (cell && typeof cell.x === 'number' && typeof cell.y === 'number') {
+                  next.set(`${cell.x},${cell.y}`, {
+                    x: cell.x,
+                    y: cell.y,
+                    color: cell.color,
+                    ownerId: cell.uid || cell.ownerId,
+                    ownerUsername: cell.username || cell.ownerUsername || 'player',
+                    version: cell.version || 1,
+                    updatedAt: cell.updatedAt || Date.now(),
+                  });
+                }
+              });
+              return next;
+            });
+          }
+        },
+        (err) => {
+          if (err?.message?.toLowerCase().includes('permission_denied') || err?.message?.toLowerCase().includes('permission denied')) {
+            setRtdbStatus('permission-denied');
+          }
+        }
+      );
+      unsubscribes.push(unsub);
+    }
+
+    return () => {
+      unsubscribes.forEach((u) => u());
+    };
+  }, [visibleChunkIds]);
+
+  // Subscribe to Firebase Realtime Presence (`presence/{uid}/connections/{tabId}`)
+  useEffect(() => {
+    if (!currentUser) return;
+    const stopPresence = startUserPresenceSession(currentUser, activeTab);
+    const stopOnlineListener = subscribeToOnlinePlayers((onlineList) => {
+      if (onlineList.length > 0) {
+        setStats((prev) => ({
+          ...prev,
+          onlinePlayersCount: onlineList.length,
+          onlinePlayers: onlineList,
+        }));
+      }
+    });
+    return () => {
+      stopPresence();
+      stopOnlineListener();
+    };
+  }, [currentUser?.id, currentUser?.username, activeTab]);
+
+  // Multi-tab BroadcastChannel sync for instant cross-tab updates
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return;
     const bc = new BroadcastChannel('dotwall_global_sync');
@@ -400,14 +534,24 @@ export function App() {
         if (msg.historyEntry) {
           setHistory((prev) => [...prev.slice(-199), msg.historyEntry]);
         }
+      } else if (msg?.type === 'pixel_undone' && typeof msg.x === 'number' && typeof msg.y === 'number') {
+        setPixelsMap((prev) => {
+          const next = new Map(prev);
+          if (msg.restoredPixel) {
+            next.set(`${msg.x},${msg.y}`, msg.restoredPixel);
+          } else {
+            next.delete(`${msg.x},${msg.y}`);
+          }
+          return next;
+        });
       }
     };
     return () => bc.close();
   }, []);
 
-  // SSE stream when connected to local server
+  // SSE stream when connected to local server on localhost
   useEffect(() => {
-    if (!currentUser || connectionMode !== 'local-server') return;
+    if (!currentUser || connectionMode !== 'local-server' || !isLocalhostRuntime()) return;
 
     const params = new URLSearchParams({
       sessionId: SESSION_ID,
@@ -442,6 +586,12 @@ export function App() {
           setPixelsMap((prev) => {
             const next = new Map(prev);
             next.set(`${data.pixel.x},${data.pixel.y}`, data.pixel);
+            return next;
+          });
+        } else if (data.deletedCoord) {
+          setPixelsMap((prev) => {
+            const next = new Map(prev);
+            next.delete(`${data.deletedCoord.x},${data.deletedCoord.y}`);
             return next;
           });
         }
@@ -515,7 +665,7 @@ export function App() {
     return () => es.close();
   }, [currentUser?.id, connectionMode, activeTab]);
 
-  // PLACE OR MODIFY PIXEL (Permanent Ink Rule: No removal/undo)
+  // PLACE OR MODIFY PIXEL
   const handlePlacePixel = useCallback(
     async (x: number, y: number, color: string) => {
       if (!currentUser) {
@@ -529,26 +679,75 @@ export function App() {
         return { ok: false, error: `Cooldown active! Wait ${waitSec}s.` };
       }
 
-      // If connected to Local Server
-      if (connectionMode === 'local-server') {
+      // 1. Try Firebase RTDB Chunked Placement first when RTDB is connected
+      if (rtdbStatus === 'connected') {
+        try {
+          const fbRes = await placePixelInFirebase({
+            user: currentUser,
+            x,
+            y,
+            color,
+          });
+          if (fbRes.ok && fbRes.pixel && fbRes.historyEntry && fbRes.nextCooldownAt) {
+            const nextUser: PlayerProfile = {
+              ...currentUser,
+              pixelsPlaced: (currentUser.pixelsPlaced || 0) + 1,
+              points:
+                (currentUser.points || 0) +
+                (fbRes.historyEntry.actionType === 'replace' ? 12 : 10),
+              lastPixelAt: now,
+              nextCooldownAt: fbRes.nextCooldownAt,
+            };
+            setPixelsMap((prev) => {
+              const next = new Map(prev);
+              next.set(`${x},${y}`, fbRes.pixel!);
+              setStats(recomputeStatsFromState(next, users, artworks));
+              return next;
+            });
+            setHistory((prev) => [...prev.slice(-199), fbRes.historyEntry!]);
+            setCurrentUser(nextUser);
+            setUsers((prev) => prev.map((u) => (u.id === nextUser.id ? nextUser : u)));
+            trackGameEvent('pixel_placed', {
+              x,
+              y,
+              actionType: fbRes.historyEntry.actionType,
+            });
+            return { ok: true };
+          } else if (fbRes.error && !fbRes.error.toLowerCase().includes('permission')) {
+            return { ok: false, error: fbRes.error };
+          }
+        } catch {
+          // Fall through if RTDB rules are not yet published
+        }
+      }
+
+      // 2. If connected to Local Server on localhost
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/pixel/place', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: currentUser.id, x, y, color }),
+            body: JSON.stringify({
+              userId: currentUser.id,
+              username: currentUser.username,
+              x,
+              y,
+              color,
+            }),
           });
           const data = await res.json();
           if (data.serverTime) setServerTimeOffsetMs(data.serverTime - Date.now());
           if (!data.ok) return { ok: false, error: data.error };
           if (data.user) setCurrentUser(data.user);
           if (data.stats) setStats(data.stats);
+          trackGameEvent('pixel_placed', { x, y });
           return { ok: true };
         } catch {
-          // Fall through to client/Firebase engine if fetch fails
+          // Fall through to client engine
         }
       }
 
-      // Static / Firebase Realtime Engine
+      // 3. Synchronized Client / BroadcastChannel Engine
       const key = `${x},${y}`;
       const existing = pixelsMap.get(key);
       const isReplacement = Boolean(existing);
@@ -597,7 +796,16 @@ export function App() {
       setPixelsMap((prev) => {
         const next = new Map(prev);
         next.set(key, updatedPixel);
-        setStats(recomputeStatsFromState(next, users, artworks));
+        const nextUsers = users.map((u) => (u.id === nextUser.id ? nextUser : u));
+        setStats(recomputeStatsFromState(next, nextUsers, artworks));
+        persistToLocalStore(
+          next,
+          nextUsers,
+          [...history, histEntry],
+          taskSubmissions,
+          artworks,
+          comments
+        );
         return next;
       });
       setHistory((prev) => [...prev.slice(-199), histEntry]);
@@ -610,16 +818,128 @@ export function App() {
         historyEntry: histEntry,
       });
 
-      // Sync to Firebase Realtime Database if active
-      const fb = getFirebaseInstances();
-      if (fb) {
-        set(ref(fb.db, `dotwall/pixels/${x}_${y}`), updatedPixel).catch(() => {});
-      }
-
+      trackGameEvent('pixel_placed', { x, y, actionType: histEntry.actionType });
       return { ok: true };
     },
-    [currentUser, connectionMode, pixelsMap, recomputeStatsFromState, users, artworks]
+    [
+      currentUser,
+      rtdbStatus,
+      connectionMode,
+      pixelsMap,
+      recomputeStatsFromState,
+      users,
+      artworks,
+      history,
+      taskSubmissions,
+      comments,
+      persistToLocalStore,
+    ]
   );
+
+  // SAFE UNDO LAST PIXEL PLACEMENT (Only if not overwritten by another user; does NOT reset cooldown)
+  const handleUndoPixel = useCallback(async () => {
+    if (!currentUser) {
+      return { ok: false, error: 'Sign in required to undo.' };
+    }
+
+    const entry = [...history]
+      .reverse()
+      .find(
+        (h) =>
+          h.userId === currentUser.id &&
+          !h.undone &&
+          (h.actionType === 'place' || h.actionType === 'replace') &&
+          Boolean(h.newColor)
+      );
+
+    if (!entry || !entry.newColor) {
+      return { ok: false, error: 'No eligible recent placement found to undo.' };
+    }
+
+    const key = `${entry.x},${entry.y}`;
+    const currentCell = pixelsMap.get(key);
+    if (
+      !currentCell ||
+      currentCell.ownerId !== currentUser.id ||
+      currentCell.color.toUpperCase() !== entry.newColor.toUpperCase()
+    ) {
+      return {
+        ok: false,
+        error: 'Cannot undo: another player has already modified this pixel!',
+      };
+    }
+
+    if (rtdbStatus === 'connected') {
+      try {
+        const fbRes = await undoLastPlacementInFirebase(currentUser, history);
+        if (!fbRes.ok && fbRes.error && !fbRes.error.toLowerCase().includes('permission')) {
+          return fbRes;
+        }
+      } catch {
+        // continue to local state update
+      }
+    }
+
+    if (connectionMode === 'local-server' && isLocalhostRuntime()) {
+      try {
+        const res = await fetch('/api/pixel/undo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: currentUser.id }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          return { ok: true, x: entry.x, y: entry.y };
+        }
+      } catch {
+        // fall through
+      }
+    }
+
+    const restoredPixel: GlobalPixel | null =
+      entry.prevColor && entry.prevOwnerId
+        ? {
+            x: entry.x,
+            y: entry.y,
+            color: entry.prevColor,
+            ownerId: entry.prevOwnerId,
+            ownerUsername: entry.prevOwnerUsername || 'player',
+            version: (currentCell.version || 1) + 1,
+            updatedAt: Date.now(),
+          }
+        : null;
+
+    setPixelsMap((prev) => {
+      const next = new Map(prev);
+      if (restoredPixel) {
+        next.set(key, restoredPixel);
+      } else {
+        next.delete(key);
+      }
+      setStats(recomputeStatsFromState(next, users, artworks));
+      return next;
+    });
+
+    setHistory((prev) => prev.map((h) => (h.id === entry.id ? { ...h, undone: true } : h)));
+
+    broadcastChannelRef.current?.postMessage({
+      type: 'pixel_undone',
+      x: entry.x,
+      y: entry.y,
+      restoredPixel,
+    });
+
+    return { ok: true, x: entry.x, y: entry.y };
+  }, [
+    currentUser,
+    history,
+    pixelsMap,
+    rtdbStatus,
+    connectionMode,
+    recomputeStatsFromState,
+    users,
+    artworks,
+  ]);
 
   // SUBMIT SEQUENTIAL DAILY TASK
   const handleSubmitTask = useCallback(
@@ -637,7 +957,48 @@ export function App() {
         return { ok: false, error: 'Sign in required.' };
       }
 
-      if (connectionMode === 'local-server') {
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      const alreadyClaimed = taskSubmissions.some(
+        (s) =>
+          s.userId === currentUser.id &&
+          s.taskId === payload.taskId &&
+          new Date(s.createdAt).toISOString().slice(0, 10) === todayUtc
+      );
+      if (alreadyClaimed) {
+        return {
+          ok: false,
+          error: `You already claimed today's daily reward (${todayUtc} UTC) for this task!`,
+        };
+      }
+
+      const taskObj = tasks.find((t) => t.id === payload.taskId);
+      const reward = (taskObj?.rewardPoints || 60) + (payload.dailyStageIndex === 5 ? 250 : 0);
+
+      if (rtdbStatus === 'connected') {
+        try {
+          const fbRes = await submitTaskInFirebase({
+            user: currentUser,
+            taskId: payload.taskId,
+            taskTitle: payload.title || taskObj?.title || payload.taskId,
+            taskCategory: taskObj?.category || 'Everyday Objects',
+            gridSize: taskObj?.gridSize || 16,
+            pixels: payload.pixels,
+            accuracyScore: payload.accuracyScore,
+            rewardPoints: reward,
+            title: payload.title || taskObj?.title || payload.taskId,
+            description: payload.description,
+            shareToCommunity: payload.shareToCommunity,
+            dailyStageIndex: payload.dailyStageIndex,
+          });
+          if (!fbRes.ok && fbRes.error && !fbRes.error.toLowerCase().includes('permission')) {
+            return { ok: false, error: fbRes.error };
+          }
+        } catch {
+          // fall through
+        }
+      }
+
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/tasks/submit', {
             method: 'POST',
@@ -648,17 +1009,15 @@ export function App() {
           if (data.ok) {
             if (data.user) setCurrentUser(data.user);
             if (data.stats) setStats(data.stats);
+            trackGameEvent('task_submitted', { taskId: payload.taskId });
             return { ok: true };
           }
         } catch {
-          // Fall through to client/Firebase engine
+          // Fall through
         }
       }
 
       const now = Date.now();
-      const taskObj = tasks.find((t) => t.id === payload.taskId);
-      const reward = (taskObj?.rewardPoints || 60) + (payload.dailyStageIndex === 5 ? 250 : 0);
-
       const newSub: TaskSubmission = {
         id: `sub-${now}`,
         taskId: payload.taskId,
@@ -707,10 +1066,11 @@ export function App() {
       };
       setCurrentUser(nextUser);
       setUsers((prev) => prev.map((u) => (u.id === nextUser.id ? nextUser : u)));
+      trackGameEvent('task_submitted', { taskId: payload.taskId, reward });
 
       return { ok: true };
     },
-    [currentUser, connectionMode, tasks]
+    [currentUser, taskSubmissions, tasks, rtdbStatus, connectionMode]
   );
 
   const handleToggleLikeArtwork = useCallback(
@@ -719,7 +1079,7 @@ export function App() {
         setShowAuthModal(true);
         return;
       }
-      if (connectionMode === 'local-server') {
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           await fetch('/api/artworks/like', {
             method: 'POST',
@@ -753,7 +1113,7 @@ export function App() {
         setShowAuthModal(true);
         return { ok: false, error: 'Sign in required.' };
       }
-      if (connectionMode === 'local-server') {
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/comments/create', {
             method: 'POST',
@@ -794,7 +1154,7 @@ export function App() {
 
   const handleReportComment = useCallback(
     async (commentId: string, reason: string, hideImmediately = false) => {
-      if (connectionMode === 'local-server') {
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         fetch('/api/comments/report', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -823,7 +1183,7 @@ export function App() {
       avatarColor: string;
     }) => {
       if (!currentUser) return { ok: false, error: 'Not signed in.' };
-      if (connectionMode === 'local-server') {
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/profile', {
             method: 'POST',
@@ -851,7 +1211,7 @@ export function App() {
     [currentUser, connectionMode]
   );
 
-  // Full Login / Sign Up Handler (Firebase Auth + Local/Global Profile)
+  // Full Login / Sign Up Handler (Firebase Auth `dotwall-13046` + Profile Sync)
   const handleAuthAction = useCallback(
     async (payload: {
       mode: 'login' | 'signup';
@@ -861,53 +1221,75 @@ export function App() {
       avatarEmoji?: string;
       avatarColor?: string;
     }) => {
-      const fb = getFirebaseInstances();
-      if (fb && payload.email && payload.password && payload.email.includes('@')) {
+      let firebaseUid: string | null = null;
+
+      if (payload.email && payload.password && payload.email.includes('@')) {
         try {
           if (payload.mode === 'signup') {
-            const cred = await createUserWithEmailAndPassword(
-              fb.auth,
-              payload.email,
-              payload.password
-            );
-            await fbUpdateProfile(cred.user, { displayName: payload.username });
+            const prof = await registerWithEmail({
+              email: payload.email,
+              password: payload.password,
+              username: payload.username,
+              avatarEmoji: payload.avatarEmoji,
+              avatarColor: payload.avatarColor,
+            });
+            firebaseUid = prof.id;
           } else {
-            await signInWithEmailAndPassword(fb.auth, payload.email, payload.password);
+            const prof = await loginWithEmail(payload.email, payload.password);
+            firebaseUid = prof.id;
           }
         } catch (err: any) {
-          return { ok: false, error: err?.message || 'Firebase Auth error' };
+          // If Firebase Auth succeeded in creating/signing in the user but RTDB profile read threw permission_denied,
+          // check if getFirebaseAuth().currentUser is populated!
+          const activeFbUser = getFirebaseAuth().currentUser;
+          if (activeFbUser && activeFbUser.email?.toLowerCase() === payload.email.trim().toLowerCase()) {
+            firebaseUid = activeFbUser.uid;
+          } else {
+            return { ok: false, error: formatFirebaseAuthError(err) };
+          }
         }
       }
 
-      const cleanHandle = payload.username
+      const cleanHandle = (
+        payload.username ||
+        payload.email?.split('@')[0] ||
+        `pixel_${Math.floor(100 + Math.random() * 899)}`
+      )
         .replace(/^@/, '')
         .replace(/[^a-zA-Z0-9_.-]/g, '')
         .slice(0, 24);
 
-      if (connectionMode === 'local-server') {
+      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/auth', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              userId: firebaseUid || undefined,
               username: cleanHandle,
-              loginByUsername: true,
+              loginByUsername: !firebaseUid,
               avatarEmoji: payload.avatarEmoji,
               avatarColor: payload.avatarColor,
             }),
           });
           const data = await res.json();
           if (data.ok && data.user) {
-            window.localStorage.setItem(USER_ID_STORAGE_KEY, data.user.id);
-            setCurrentUser(data.user);
+            const mergedUser: PlayerProfile = firebaseUid
+              ? { ...data.user, id: firebaseUid }
+              : data.user;
+            window.localStorage.setItem(USER_ID_STORAGE_KEY, mergedUser.id);
+            setCurrentUser(mergedUser);
             setUsers((prev) =>
-              prev.some((u) => u.id === data.user.id) ? prev : [...prev, data.user]
+              prev.some((u) => u.id === mergedUser.id)
+                ? prev.map((u) => (u.id === mergedUser.id ? mergedUser : u))
+                : [...prev, mergedUser]
             );
             pushNotification(
-              `Signed in as @${data.user.username}`,
-              'Your global cooldown and pixel stats are now synced to this account.',
-              data.user.avatarEmoji || '👾'
+              `Signed in as @${mergedUser.username}`,
+              'Your Firebase UID, cooldown, and pixel stats are now synced.',
+              mergedUser.avatarEmoji || '👾'
             );
+            trackGameEvent('login', { method: payload.email ? 'email' : 'username' });
             return { ok: true };
           }
         } catch {
@@ -915,12 +1297,15 @@ export function App() {
         }
       }
 
-      // Static/Firebase profile lookup or creation
-      let found = users.find((u) => u.username.toLowerCase() === cleanHandle.toLowerCase());
+      let found = users.find(
+        (u) =>
+          (firebaseUid && u.id === firebaseUid) ||
+          u.username.toLowerCase() === cleanHandle.toLowerCase()
+      );
       if (!found) {
         found = {
-          id: `usr-${Date.now().toString(36)}`,
-          username: cleanHandle || `pixel_${Math.floor(100 + Math.random() * 899)}`,
+          id: firebaseUid || `usr-${Date.now().toString(36)}`,
+          username: cleanHandle,
           displayName: cleanHandle,
           avatarEmoji: payload.avatarEmoji || '👾',
           avatarColor: payload.avatarColor || '#6B3DFF',
@@ -948,31 +1333,53 @@ export function App() {
   );
 
   const handleGoogleLogin = useCallback(async () => {
-    const fb = getFirebaseInstances();
-    if (!fb) {
-      setShowAuthModal(false);
-      setShowBackendModal(true);
-      return {
-        ok: false,
-        error: 'Paste your Firebase Config in the Server Config modal to enable Google 1-Click Login!',
-      };
-    }
     try {
-      const provider = new GoogleAuthProvider();
-      const cred = await signInWithPopup(fb.auth, provider);
-      const uName =
-        cred.user.displayName?.replace(/\s+/g, '_').toLowerCase() ||
-        cred.user.email?.split('@')[0] ||
-        'google_player';
-      return await handleAuthAction({
-        mode: 'login',
-        username: uName,
-        email: cred.user.email || undefined,
-      });
+      const prof = await loginWithGooglePopup();
+      window.localStorage.setItem(USER_ID_STORAGE_KEY, prof.id);
+      setCurrentUser(prof);
+      setUsers((prev) => (prev.some((u) => u.id === prof.id) ? prev : [...prev, prof]));
+      pushNotification(
+        `Signed in with Google as @${prof.username}`,
+        'Your Firebase UID is active across the 1000×1000 wall.',
+        prof.avatarEmoji
+      );
+      trackGameEvent('login', { method: 'google' });
+      return { ok: true };
     } catch (err: any) {
-      return { ok: false, error: err?.message || 'Google sign-in cancelled.' };
+      const activeFbUser = getFirebaseAuth().currentUser;
+      if (activeFbUser) {
+        const cleanName = (
+          activeFbUser.displayName ||
+          activeFbUser.email?.split('@')[0] ||
+          `google_${activeFbUser.uid.slice(0, 5)}`
+        )
+          .replace(/[^a-zA-Z0-9_.-]/g, '')
+          .slice(0, 22);
+        return await handleAuthAction({
+          mode: 'login',
+          username: cleanName,
+          email: activeFbUser.email || undefined,
+        });
+      }
+      return { ok: false, error: formatFirebaseAuthError(err) };
     }
-  }, [handleAuthAction]);
+  }, [pushNotification, handleAuthAction]);
+
+  const handleResetPassword = useCallback(async (email: string) => {
+    try {
+      await sendAccountPasswordReset(email);
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: formatFirebaseAuthError(err) };
+    }
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await logoutFirebaseUser();
+    window.localStorage.removeItem(USER_ID_STORAGE_KEY);
+    setCurrentUser(null);
+    pushNotification('Signed Out', 'You have signed out of your Dotwall account.', '👋');
+  }, [pushNotification]);
 
   const handleInspectPlayer = useCallback((username: string) => {
     setInspectedUsername(username);
@@ -1018,6 +1425,9 @@ export function App() {
     { id: 'community', label: 'Community', icon: <MessageSquare size={14} /> },
     { id: 'profile', label: 'Profile', icon: <User size={14} /> },
   ];
+
+  const isCurrentlyDark =
+    document.documentElement.getAttribute('data-theme') === 'dark' || appearance.mode === 'dark';
 
   return (
     <div className="wrap">
@@ -1184,15 +1594,31 @@ export function App() {
             )}
           </div>
 
-          {/* Theme Switcher */}
+          {/* Quick Light/Dark Toggle */}
           <button
             type="button"
             className="nav-icon-btn"
-            onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-            title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} mode`}
+            onClick={() =>
+              setAppearance((prev) => ({
+                ...prev,
+                mode: isCurrentlyDark ? 'light' : 'dark',
+              }))
+            }
+            title={`Switch to ${isCurrentlyDark ? 'Light' : 'Dark'} mode`}
             aria-label="Toggle theme"
           >
-            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            {isCurrentlyDark ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+
+          {/* Complete Theme & Custom Appearance Studio Button */}
+          <button
+            type="button"
+            className="nav-icon-btn"
+            onClick={() => setShowThemeModal(true)}
+            title="Custom Theme & Appearance Studio"
+            aria-label="Customize appearance"
+          >
+            <Paintbrush size={15} />
           </button>
 
           {/* Login / Account Pill */}
@@ -1228,13 +1654,13 @@ export function App() {
           <header className="hero">
             <div>
               <p className="eyebrow">
-                GLOBAL COLLABORATIVE CANVAS · 1000 × 1000 · PERMANENT INK
+                GLOBAL COLLABORATIVE CANVAS · 1000 × 1000 · REAL-TIME MULTIPLAYER
               </p>
               <h1>Draw something together, one pixel at a time.</h1>
               <p className="lede">
-                Every player shares one massive 1,000,000-pixel canvas. Once placed, pixels cannot be
-                undone or removed — only modified upon! Plus, complete 5 random object tasks one by
-                one every day.
+                Every player shares one massive 1,000,000-pixel canvas. Place new pixels, replace
+                existing ones after a 30s cooldown, or complete 5 random object tasks one by one
+                every day.
               </p>
               <div className="cta">
                 <button
@@ -1258,7 +1684,7 @@ export function App() {
                   className="btn"
                   onClick={() => setShowAuthModal(true)}
                 >
-                  <LogIn size={15} /> Login / Sign Up
+                  <LogIn size={15} /> {currentUser ? `@${currentUser.username}` : 'Login / Sign Up'}
                 </button>
               </div>
             </div>
@@ -1420,7 +1846,9 @@ export function App() {
               cooldownRemainingMs={cooldownRemainingMs}
               nextCooldownAt={nextCooldownAt}
               onPlacePixel={handlePlacePixel}
+              onUndoPixel={handleUndoPixel}
               onInspectPlayer={handleInspectPlayer}
+              onVisibleChunksChange={setVisibleChunkIds}
             />
           </main>
 
@@ -1441,7 +1869,7 @@ export function App() {
           <div className="wall-studio-banner">
             <div>
               <span className="eyebrow">
-                GLOBAL CANVAS STUDIO · 1000 × 1000 · PERMANENT PIXELS (MODIFY ONLY)
+                GLOBAL CANVAS STUDIO · 1000 × 1000 · EXPANDED &amp; FULLSCREEN WORKSPACE
               </span>
               <h1 className="view-title" style={{ fontSize: 28 }}>
                 The 1,000,000-Pixel Shared Wall
@@ -1468,7 +1896,9 @@ export function App() {
             cooldownRemainingMs={cooldownRemainingMs}
             nextCooldownAt={nextCooldownAt}
             onPlacePixel={handlePlacePixel}
+            onUndoPixel={handleUndoPixel}
             onInspectPlayer={handleInspectPlayer}
+            onVisibleChunksChange={setVisibleChunkIds}
           />
         </main>
       )}
@@ -1660,15 +2090,25 @@ export function App() {
         </div>
       )}
 
+      {/* THEME & CUSTOM APPEARANCE MODAL */}
+      <ThemeCustomizerModal
+        isOpen={showThemeModal}
+        onClose={() => setShowThemeModal(false)}
+        settings={appearance}
+        onChange={setAppearance}
+      />
+
       {/* LOGIN / SIGN UP MODAL */}
       <AuthModal
         isOpen={showAuthModal}
         onClose={() => setShowAuthModal(false)}
         currentUser={currentUser}
         users={users}
-        isFirebaseActive={connectionMode === 'firebase-cloud'}
+        isFirebaseActive={true}
         onLogin={handleAuthAction}
         onGoogleLogin={handleGoogleLogin}
+        onPasswordReset={handleResetPassword}
+        onLogout={handleLogout}
         onOpenCloudConfig={() => setShowBackendModal(true)}
       />
 
@@ -1678,6 +2118,7 @@ export function App() {
         onClose={() => setShowBackendModal(false)}
         connectionMode={connectionMode}
         onlineCount={stats.onlinePlayersCount}
+        rtdbStatus={rtdbStatus}
         onConfigSaved={() => {
           setShowBackendModal(false);
           initializeMultiplayer();
@@ -1687,20 +2128,23 @@ export function App() {
       {/* FOOTER */}
       <footer className="foot">
         <span>
-          dotwall · 1000 × 1000 (1,000,000 pixels) · Permanent Ink (Modify Only) · 5 Daily Objects
-          · {stats.pixelsUsed.toLocaleString()} pixels placed
+          dotwall · 1000 × 1000 (1,000,000 pixels) · Firebase (`dotwall-13046`) · 5 Daily Objects ·{' '}
+          {stats.pixelsUsed.toLocaleString()} pixels placed
         </span>
-        <span>
+        <span style={{ display: 'flex', gap: 10 }}>
+          <button
+            type="button"
+            className="mini-link-btn"
+            onClick={() => setShowThemeModal(true)}
+          >
+            🎨 Custom Theme Studio
+          </button>
           <button
             type="button"
             className="mini-link-btn"
             onClick={() => setShowBackendModal(true)}
           >
-            {connectionMode === 'firebase-cloud'
-              ? '🔥 Firebase Global Realtime Connected'
-              : connectionMode === 'supabase-cloud'
-                ? '⚡ Supabase Realtime Cloud'
-                : '⚡ Connect Firebase / Global Server'}
+            🔥 Firebase (`dotwall-13046`) Connected
           </button>
         </span>
       </footer>

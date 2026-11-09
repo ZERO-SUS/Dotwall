@@ -1,0 +1,76 @@
+{
+  "rules": {
+    "users": {
+      ".read": true,
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['id', 'username', 'points', 'pixelsPlaced']) && newData.child('id').val() === $uid && newData.child('username').isString() && newData.child('username').val().length >= 2 && newData.child('username').val().length <= 24 && newData.child('pixelsPlaced').isNumber() && newData.child('pixelsPlaced').val() >= 0 && (!data.exists() || newData.child('points').val() <= data.child('points').val() + 380)"
+      }
+    },
+    "presence": {
+      ".read": true,
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "cooldowns": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['uid', 'lastPlacedAt', 'nextCooldownAt']) && newData.child('uid').val() === $uid && (!data.exists() || data.child('nextCooldownAt').val() <= now || newData.child('nextCooldownAt').val() === 0)"
+      }
+    },
+    "canvasChunks": {
+      ".read": true,
+      "$chunkId": {
+        "$pixelKey": {
+          ".write": "auth != null && (!root.child('cooldowns/' + auth.uid + '/nextCooldownAt').exists() || root.child('cooldowns/' + auth.uid + '/nextCooldownAt').val() <= now + 31000)",
+          ".validate": "!newData.exists() || (newData.hasChildren(['x', 'y', 'color', 'ownerId', 'ownerUsername', 'version', 'updatedAt']) && newData.child('ownerId').val() === auth.uid && newData.child('x').isNumber() && newData.child('x').val() >= 0 && newData.child('x').val() < 1000 && newData.child('y').isNumber() && newData.child('y').val() >= 0 && newData.child('y').val() < 1000 && newData.child('color').isString() && newData.child('color').val().matches(/^#[0-9A-Fa-f]{6}$/))"
+        }
+      }
+    },
+    "placements": {
+      ".read": true,
+      ".indexOn": ["createdAt", "userId"],
+      "$placementId": {
+        ".write": "auth != null && (!data.exists() ? newData.child('userId').val() === auth.uid : data.child('userId').val() === auth.uid)",
+        ".validate": "newData.hasChildren(['id', 'x', 'y', 'userId', 'username', 'createdAt'])"
+      }
+    },
+    "taskClaims": {
+      ".read": "auth != null",
+      "$claimId": {
+        ".write": "auth != null && !data.exists() && newData.child('uid').val() === auth.uid"
+      }
+    },
+    "taskSubmissions": {
+      ".read": true,
+      ".indexOn": ["createdAt", "userId"],
+      "$subId": {
+        ".write": "auth != null && !data.exists() && newData.child('userId').val() === auth.uid"
+      }
+    },
+    "artworks": {
+      ".read": true,
+      ".indexOn": ["createdAt", "creatorId"],
+      "$artId": {
+        ".write": "auth != null && (!data.exists() ? newData.child('creatorId').val() === auth.uid : true)",
+        ".validate": "newData.hasChildren(['id', 'title', 'creatorId', 'creatorUsername', 'pixels']) && newData.child('title').isString() && newData.child('title').val().length >= 1 && newData.child('title').val().length <= 80"
+      }
+    },
+    "comments": {
+      ".read": true,
+      ".indexOn": ["createdAt", "artworkId"],
+      "$commentId": {
+        ".write": "auth != null && (!data.exists() ? newData.child('userId').val() === auth.uid : true)",
+        ".validate": "newData.hasChildren(['id', 'userId', 'username', 'content', 'createdAt']) && newData.child('content').isString() && newData.child('content').val().length >= 1 && newData.child('content').val().length <= 500"
+      }
+    },
+    "reports": {
+      ".read": "auth != null",
+      "$reportId": {
+        ".write": "auth != null && !data.exists()"
+      }
+    }
+  }
+}

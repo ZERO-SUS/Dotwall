@@ -62,10 +62,48 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
 }) => {
   const todayKey = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
+  // Live UTC daily reset countdown (00:00 UTC)
+  const [utcCountdown, setUtcCountdown] = useState<string>('');
+  useEffect(() => {
+    const updateCountdown = () => {
+      const now = new Date();
+      const nextUtcMidnight = Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate() + 1,
+        0,
+        0,
+        0
+      );
+      const diffMs = Math.max(0, nextUtcMidnight - now.getTime());
+      const hrs = Math.floor(diffMs / 3_600_000);
+      const mins = Math.floor((diffMs % 3_600_000) / 60_000);
+      const secs = Math.floor((diffMs % 60_000) / 1000);
+      setUtcCountdown(`${hrs}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`);
+    };
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Track which taskIds this user has already claimed rewards for today (UTC date)
+  const claimedTaskIdsToday = useMemo(() => {
+    const set = new Set<string>();
+    const uid = currentUser?.id;
+    for (const sub of submissions) {
+      const subDate = sub.createdAt ? new Date(sub.createdAt).toISOString().slice(0, 10) : todayKey;
+      if (subDate === todayKey && (!uid || sub.userId === uid)) {
+        set.add(sub.taskId);
+      }
+    }
+    return set;
+  }, [submissions, currentUser?.id, todayKey]);
+
   // Generate or load the player's 5 random objects for today
   const [dailyQueueIds, setDailyQueueIds] = useState<string[]>([]);
   const [currentStageIdx, setCurrentStageIdx] = useState<number>(0); // 0..4 (or 5 when all 5 done)
   const [bonusModeTask, setBonusModeTask] = useState<PixelTask | null>(null);
+  const [showAllObjectsCatalog, setShowAllObjectsCatalog] = useState<boolean>(false);
 
   useEffect(() => {
     if (tasks.length === 0) return;
@@ -385,6 +423,14 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
       return;
     }
 
+    if (claimedTaskIdsToday.has(activeTask.id)) {
+      setSubmitStatus({
+        text: `You have already claimed today's daily reward (${todayKey} UTC) for "${activeTask.title}". Pick or reroll another object!`,
+        kind: 'error',
+      });
+      return;
+    }
+
     setIsSubmitting(true);
     const stageNumber = Math.min(DAILY_QUOTA_MAX, currentStageIdx + 1);
     const res = await onSubmitTask({
@@ -409,6 +455,7 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
       setCanvasMap(new Map());
       setUndoStack([]);
       setRedoStack([]);
+      setBonusModeTask(null);
 
       if (!isDailyQuotaComplete) {
         const nextStage = currentStageIdx + 1;
@@ -429,8 +476,9 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
         }
       } else {
         // In bonus endless mode, roll another random object immediately
-        const pool = tasks.filter((t) => t.id !== activeTask.id);
-        const pick = pool[Math.floor(Math.random() * pool.length)];
+        const pool = tasks.filter((t) => t.id !== activeTask.id && !claimedTaskIdsToday.has(t.id));
+        const fallbackPool = pool.length > 0 ? pool : tasks.filter((t) => t.id !== activeTask.id);
+        const pick = fallbackPool[Math.floor(Math.random() * fallbackPool.length)];
         setBonusModeTask(pick);
         setSubmitStatus({
           text: `✅ Bonus Object Complete! Loaded next random object: "${pick.title}"!`,
@@ -456,37 +504,106 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
       <div className="section-hero-card">
         <div>
           <span className="eyebrow">
-            SEQUENTIAL 5-OBJECT DAILY GAUNTLET · ONE BY ONE · NO GLOBAL COOLDOWN
+            SEQUENTIAL 5-OBJECT DAILY GAUNTLET · RESETS DAILY AT 00:00 UTC ({utcCountdown})
           </span>
           <h1 className="view-title">
-            {isDailyQuotaComplete
-              ? '🎉 All 5 Daily Objects Completed!'
-              : `Daily Object ${currentStageIdx + 1} of ${DAILY_QUOTA_MAX}: ${activeTask?.title || ''}`}
+            {bonusModeTask
+              ? `Selected Challenge: ${activeTask?.title || ''}`
+              : isDailyQuotaComplete
+                ? '🎉 All 5 Daily Objects Completed!'
+                : `Daily Object ${currentStageIdx + 1} of ${DAILY_QUOTA_MAX}: ${activeTask?.title || ''}`}
           </h1>
           <p className="lede">
-            Every day you get <b>5 random objects one by one</b>. Complete your current object to
-            automatically unlock the next random object in your 5-task daily run!
+            Every day at <b>00:00 UTC</b> you get <b>5 random objects one by one</b>, or browse all{' '}
+            <b>{tasks.length} pixel objects</b> (Apple, House, Tree, Cat, Rocket, Car, Flower,
+            Spaceship, Mountain, Sun, Fish, Heart &amp; more) with zero placement cooldown.
           </p>
         </div>
         <div className="task-hero-actions">
-          <button type="button" className="btn" onClick={handleRerollCurrentObject}>
-            <Shuffle size={16} /> Reroll Current Object
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setShowAllObjectsCatalog((v) => !v)}
+          >
+            <Trophy size={16} />{' '}
+            {showAllObjectsCatalog ? 'Hide Object Catalog' : `Browse All ${tasks.length} Objects`}
           </button>
-          {isDailyQuotaComplete && (
+          <button type="button" className="btn" onClick={handleRerollCurrentObject}>
+            <Shuffle size={16} /> Random Object
+          </button>
+          {bonusModeTask && !isDailyQuotaComplete && (
             <button
               type="button"
               className="btn primary"
               onClick={() => {
-                const pick = tasks[Math.floor(Math.random() * tasks.length)];
-                setBonusModeTask(pick);
+                setBonusModeTask(null);
                 setCanvasMap(new Map());
               }}
             >
-              <Sparkles size={16} /> Next Bonus Random Object
+              Return to Daily Gauntlet ({currentStageIdx + 1}/5)
             </button>
           )}
         </div>
       </div>
+
+      {/* Optional Expandable Catalog of all 17 Objects */}
+      {showAllObjectsCatalog && (
+        <div className="card" style={{ marginBottom: 18 }}>
+          <h2>
+            <span>All {tasks.length} Pixel Challenge Objects (16×16 Studio)</span>
+            <span className="pick">Click any object to draw</span>
+          </h2>
+          <div
+            className="task-cards-strip"
+            style={{
+              gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))',
+              marginBottom: 0,
+            }}
+          >
+            {tasks.map((t) => {
+              const isSelected = activeTask?.id === t.id;
+              const isClaimed = claimedTaskIdsToday.has(t.id);
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  className={`task-select-card ${isSelected ? 'active' : ''}`}
+                  onClick={() => {
+                    setBonusModeTask(t);
+                    setCanvasMap(new Map());
+                    setUndoStack([]);
+                    setRedoStack([]);
+                  }}
+                >
+                  <div className="task-select-thumb" style={{ display: 'grid', placeItems: 'center' }}>
+                    <PixelArtworkPreview
+                      pixels={t.referencePixels}
+                      gridSize={t.gridSize}
+                      size={56}
+                    />
+                  </div>
+                  <div className="task-select-meta">
+                    <div className="task-badges-row">
+                      <span className={`genz-pill diff-${t.difficulty.toLowerCase()}`}>
+                        {t.difficulty}
+                      </span>
+                      {isClaimed && (
+                        <span className="genz-pill done">
+                          <CheckCircle2 size={10} /> Claimed
+                        </span>
+                      )}
+                    </div>
+                    <strong>{t.title}</strong>
+                    <span className="reward-tag">
+                      +{t.rewardPoints} XP · {t.category}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* 5-Stage Sequential Progress Track (One by One) */}
       <div className="task-cards-strip" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
