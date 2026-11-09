@@ -8,7 +8,8 @@
     "dev": "vite --host",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "provision:owner": "node scripts/provision-owner.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",

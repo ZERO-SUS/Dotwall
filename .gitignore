@@ -3,8 +3,21 @@ dist
 dist-ssr
 *.local
 .env
-.env.local
+.env.*
+!.env.example
 .DS_Store
 server/data/dotwall-db.json
 functions/node_modules
 .firebase
+*.log
+
+# Sensitive credentials & service account keys
+*service-account*.json
+*serviceAccount*.json
+*.pem
+*.key
+secrets/
+
+# Prompt instructions
+next.txt
+
