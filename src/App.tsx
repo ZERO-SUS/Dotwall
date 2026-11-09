@@ -29,6 +29,7 @@ import {
   isDeveloperAdmin,
   isReservedAdminHandle,
   NavTab,
+  OnlinePlayerPresence,
   PixelHistoryEntry,
   PixelTask,
   PlayerProfile,
@@ -743,24 +744,69 @@ export function App() {
     };
   }, [pushNotification]);
 
-  // Subscribe to Firebase Realtime Presence (UID-deduplicated)
+  // Subscribe to Realtime Presence across Firebase Cloud RTDB & local browser tabs
   useEffect(() => {
-    if (!currentUser) return;
-    const stopPresence = startUserPresenceSession(currentUser, activeTab);
-    const stopOnlineListener = subscribeToOnlinePlayers((onlineList) => {
-      if (onlineList.length > 0) {
-        setStats((prev) => ({
-          ...prev,
-          onlinePlayersCount: onlineList.length,
-          onlinePlayers: onlineList,
-        }));
+    // Merge presence with currentUser so the active user is ALWAYS present in their own presence list
+    const mergeSelfIntoPresence = (list: OnlinePlayerPresence[]): OnlinePlayerPresence[] => {
+      if (!currentUser) return list;
+      const cleanUid = currentUser.id.toLowerCase();
+      const cleanUname = (currentUser.username || '').toLowerCase();
+      const hasSelf = list.some(
+        (p) =>
+          (p.userId && p.userId.toLowerCase() === cleanUid) ||
+          (p.username && p.username.toLowerCase() === cleanUname)
+      );
+      if (!hasSelf) {
+        return [
+          {
+            userId: currentUser.id,
+            username: currentUser.username,
+            avatarEmoji: currentUser.avatarEmoji || '👾',
+            avatarColor: currentUser.avatarColor || '#6B3DFF',
+            activeView: activeTab,
+            lastSeenAt: Date.now(),
+          },
+          ...list,
+        ];
       }
-    });
-    return () => {
-      stopPresence();
-      stopOnlineListener();
+      return list.map((p) => {
+        if (
+          (p.userId && p.userId.toLowerCase() === cleanUid) ||
+          (p.username && p.username.toLowerCase() === cleanUname)
+        ) {
+          return {
+            ...p,
+            activeView: activeTab,
+            lastSeenAt: Date.now(),
+          };
+        }
+        return p;
+      });
     };
-  }, [currentUser?.id, currentUser?.username, activeTab]);
+
+    const stopOnlineListener = subscribeToOnlinePlayers((onlineList) => {
+      const merged = mergeSelfIntoPresence(onlineList);
+      setStats((prev) => ({
+        ...prev,
+        onlinePlayersCount: Math.max(1, merged.length),
+        onlinePlayers: merged,
+      }));
+    }, serverTimeOffsetMs);
+
+    let stopPresence: (() => void) | undefined;
+    if (currentUser) {
+      stopPresence = startUserPresenceSession(currentUser, activeTab, (connected) => {
+        if (connected) {
+          setConnectionState('live');
+        }
+      });
+    }
+
+    return () => {
+      stopOnlineListener();
+      stopPresence?.();
+    };
+  }, [currentUser, activeTab, serverTimeOffsetMs]);
 
   // Multi-tab BroadcastChannel sync for instant cross-tab updates
   useEffect(() => {
@@ -2128,26 +2174,78 @@ export function App() {
                     </button>
                   )}
                 </div>
-                <ul className="feed">
-                  {stats.onlinePlayers.map((p) => (
-                    <li key={p.userId}>
-                      <span
-                        className="sq"
-                        style={{ backgroundColor: p.avatarColor, borderRadius: '50%' }}
-                      />
-                      <button
-                        type="button"
-                        className="inline-user-link"
-                        onClick={() => {
-                          setShowPresenceDropdown(false);
-                          handleInspectPlayer(p.username);
+                <ul className="feed" style={{ maxHeight: 280, overflowY: 'auto' }}>
+                  {stats.onlinePlayers.map((p) => {
+                    const isSelf =
+                      currentUser &&
+                      ((p.userId && p.userId.toLowerCase() === currentUser.id.toLowerCase()) ||
+                        (p.username &&
+                          p.username.toLowerCase() === currentUser.username.toLowerCase()));
+                    return (
+                      <li
+                        key={`${p.userId}_${p.username}`}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 8,
+                          padding: '6px 8px',
+                          borderRadius: 8,
+                          background: isSelf ? 'rgba(107, 61, 255, 0.08)' : 'transparent',
                         }}
                       >
-                        {p.avatarEmoji} @{p.username}
-                      </button>
-                      <span className="at">{p.activeView}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                          <span
+                            className="sq"
+                            style={{
+                              backgroundColor: p.avatarColor || '#6B3DFF',
+                              borderRadius: '50%',
+                              flexShrink: 0,
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="inline-user-link"
+                            style={{ fontWeight: isSelf ? 700 : 500, fontSize: 13 }}
+                            onClick={() => {
+                              setShowPresenceDropdown(false);
+                              handleInspectPlayer(p.username);
+                            }}
+                          >
+                            {p.avatarEmoji || '👾'} @{p.username}
+                          </button>
+                          {isSelf && (
+                            <span
+                              className="genz-pill"
+                              style={{
+                                fontSize: 9,
+                                padding: '2px 6px',
+                                background: 'rgba(14, 159, 104, 0.15)',
+                                color: 'var(--good)',
+                              }}
+                            >
+                              YOU
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className="at"
+                          style={{
+                            fontSize: 11,
+                            color: 'var(--muted)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          ● in {p.activeView || 'game'}
+                        </span>
+                      </li>
+                    );
+                  })}
+                  {stats.onlinePlayers.length === 0 && (
+                    <li style={{ color: 'var(--muted)', fontSize: 12, padding: '8px 4px' }}>
+                      No other players active right now.
                     </li>
-                  ))}
+                  )}
                 </ul>
               </div>
             )}

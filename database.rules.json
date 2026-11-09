@@ -47,21 +47,12 @@
     "presence": {
       ".read": true,
       "$uid": {
+        ".write": "auth != null && (auth.uid === $uid || root.child('admins/' + auth.uid).val() === true || auth.token.email === 'zero_sus@dotwall.app' || (auth.token.email === 'darshan99806@gmail.com' && auth.token.email_verified === true))",
         "connections": {
           "$tabId": {
             ".write": "auth != null && (auth.uid === $uid || root.child('admins/' + auth.uid).val() === true || auth.token.email === 'zero_sus@dotwall.app' || (auth.token.email === 'darshan99806@gmail.com' && auth.token.email_verified === true))",
-            ".validate": "!newData.exists() || (newData.hasChildren(['userId', 'username', 'avatarEmoji', 'avatarColor', 'activeView', 'lastSeenAt']) && newData.child('userId').val() === $uid && newData.child('username').isString() && newData.child('username').val().length <= 24 && newData.child('lastSeenAt').val() === now)",
-            "userId": { ".validate": "newData.val() === $uid" },
-            "username": { ".validate": "newData.isString()" },
-            "avatarEmoji": { ".validate": "newData.isString()" },
-            "avatarColor": { ".validate": "newData.isString()" },
-            "activeView": { ".validate": "newData.isString()" },
-            "lastSeenAt": { ".validate": "newData.val() === now" },
-            "$other": { ".validate": false }
+            ".validate": "!newData.exists() || (newData.child('userId').val() === $uid)"
           }
-        },
-        "$other": {
-          ".validate": false
         }
       }
     },
