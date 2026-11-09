@@ -101,6 +101,9 @@ export async function ensurePlayerProfileInDb(
       }
     }
 
+    const isAppointedAdmin = Boolean(data.isAdmin === true);
+    const hasAdminStatus = isAdminUser || isAppointedAdmin;
+
     const safeUsername = isAdminUser
       ? RESERVED_ADMIN_USERNAME
       : sanitizePublicUsername(data.username || fbUser.displayName, fbUser.uid);
@@ -120,10 +123,10 @@ export async function ensurePlayerProfileInDb(
       tasksCompleted: Number(data.tasksCompleted || 0),
       points: Number(data.points || 50),
       lastPixelAt: Number(data.lastPixelAt || 0),
-      nextCooldownAt: isAdminUser ? 0 : nextCooldownAt,
+      nextCooldownAt: hasAdminStatus ? 0 : nextCooldownAt,
       joinedAt: Number(data.joinedAt || now),
       achievements: Array.isArray(data.achievements) ? data.achievements : [],
-      ...(isAdminUser ? { isAdmin: true } : {}),
+      ...(hasAdminStatus ? { isAdmin: true } : {}),
     };
   }
 

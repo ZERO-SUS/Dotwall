@@ -719,7 +719,7 @@ export async function adminBroadcastInFirebase(
   message: string
 ): Promise<void> {
   if (!isDeveloperAdmin(adminUser)) {
-    throw new Error('Unauthorized: Only @zero_sus can broadcast announcements.');
+    throw new Error('Unauthorized: Only an administrator can broadcast announcements.');
   }
   try {
     const db = getFirebaseDb();
@@ -728,11 +728,66 @@ export async function adminBroadcastInFirebase(
       title: title.slice(0, 80),
       message: message.slice(0, 300),
       adminUid: adminUser.id,
-      senderUsername: 'zero_sus',
+      senderUsername: adminUser.username,
       createdAt: serverTimestamp(),
     });
   } catch {
     // ignore
+  }
+}
+
+export async function adminPromoteUserInFirebase(
+  adminUser: PlayerProfile | null,
+  targetUserId: string,
+  promote: boolean
+): Promise<{ ok: boolean; error?: string }> {
+  if (!isDeveloperAdmin(adminUser)) {
+    return { ok: false, error: 'Unauthorized: Only an administrator can assign admin roles.' };
+  }
+  try {
+    const db = getFirebaseDb();
+    const updates: Record<string, any> = {
+      [`users/${targetUserId}/isAdmin`]: promote ? true : null,
+      [`admins/${targetUserId}`]: promote ? true : null,
+      [`users/${targetUserId}/updatedAt`]: serverTimestamp(),
+    };
+    if (promote) {
+      updates[`cooldowns/${targetUserId}/nextCooldownAt`] = 0;
+    }
+    await update(ref(db), updates);
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Failed to update admin role in Firebase.' };
+  }
+}
+
+export async function adminUpdatePasskeyInFirebase(
+  adminUser: PlayerProfile | null,
+  newPasskey: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (!isDeveloperAdmin(adminUser)) {
+    return { ok: false, error: 'Unauthorized: Only an administrator can update the passkey.' };
+  }
+  const cleanPasskey = newPasskey.trim();
+  if (cleanPasskey.length < 6) {
+    return { ok: false, error: 'Admin passkey must be at least 6 characters long.' };
+  }
+  try {
+    const db = getFirebaseDb();
+    await set(ref(db, 'system/adminPasskey'), cleanPasskey);
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Failed to update admin passkey in database.' };
+  }
+}
+
+export async function fetchAdminPasskeyFromFirebase(): Promise<string | null> {
+  try {
+    const db = getFirebaseDb();
+    const snap = await get(ref(db, 'system/adminPasskey'));
+    return snap.exists() ? String(snap.val()) : null;
+  } catch {
+    return null;
   }
 }
 

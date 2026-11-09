@@ -5,8 +5,8 @@
     "admins": {
       ".read": "auth != null",
       "$uid": {
-        ".write": false,
-        ".validate": "newData.isBoolean()"
+        ".write": "auth != null && (root.child('admins/' + auth.uid).val() === true || auth.token.email === 'zero_sus@dotwall.app' || (auth.token.email === 'darshan99806@gmail.com' && auth.token.email_verified === true))",
+        ".validate": "!newData.exists() || newData.isBoolean()"
       }
     },
     "system": {
@@ -14,6 +14,11 @@
         ".read": true,
         ".write": "auth != null && (root.child('admins/' + auth.uid).val() === true || auth.token.email === 'zero_sus@dotwall.app' || (auth.token.email === 'darshan99806@gmail.com' && auth.token.email_verified === true))",
         ".validate": "!newData.exists() || (newData.hasChildren(['id', 'title', 'message', 'adminUid', 'createdAt']) && newData.child('title').isString() && newData.child('title').val().length <= 120 && newData.child('message').isString() && newData.child('message').val().length <= 500)"
+      },
+      "adminPasskey": {
+        ".read": "auth != null && (root.child('admins/' + auth.uid).val() === true || auth.token.email === 'zero_sus@dotwall.app' || (auth.token.email === 'darshan99806@gmail.com' && auth.token.email_verified === true))",
+        ".write": "auth != null && (root.child('admins/' + auth.uid).val() === true || auth.token.email === 'zero_sus@dotwall.app' || (auth.token.email === 'darshan99806@gmail.com' && auth.token.email_verified === true))",
+        ".validate": "newData.isString() && newData.val().length >= 6 && newData.val().length <= 64"
       }
     },
     "users": {
@@ -34,7 +39,7 @@
         "lastPixelAt": { ".validate": "newData.isNumber()" },
         "nextCooldownAt": { ".validate": "newData.isNumber()" },
         "achievements": { ".validate": true },
-        "isAdmin": { ".validate": "newData.isBoolean()" },
+        "isAdmin": { ".validate": "!newData.exists() || newData.isBoolean()" },
         "updatedAt": { ".validate": "newData.isNumber()" },
         "$other": { ".validate": false }
       }

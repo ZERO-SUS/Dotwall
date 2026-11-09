@@ -74,18 +74,34 @@ export interface PlayerProfile {
   banned?: boolean;
 }
 
-export function isDeveloperAdmin(
-  user: PlayerProfile | null | undefined
-): user is PlayerProfile & { isAdmin: true } {
+export function isPlatformOwner(user: PlayerProfile | null | undefined): boolean {
   if (!user || user.isAdmin !== true) return false;
   const uname = (user.username || '').trim().toLowerCase().replace(/^@/, '');
   if (uname !== RESERVED_ADMIN_USERNAME) return false;
-
   try {
     const fbUser = getFirebaseAuth().currentUser;
     if (!fbUser || fbUser.uid !== user.id) return false;
     const email = (fbUser.email || '').trim().toLowerCase();
     return VERIFIED_ADMIN_EMAILS.has(email);
+  } catch {
+    return false;
+  }
+}
+
+export function isDeveloperAdmin(
+  user: PlayerProfile | null | undefined
+): user is PlayerProfile & { isAdmin: true } {
+  if (!user || user.isAdmin !== true) return false;
+
+  try {
+    const fbUser = getFirebaseAuth().currentUser;
+    if (!fbUser || fbUser.uid !== user.id) return false;
+    const uname = (user.username || '').trim().toLowerCase().replace(/^@/, '');
+    if (uname === RESERVED_ADMIN_USERNAME) {
+      const email = (fbUser.email || '').trim().toLowerCase();
+      return VERIFIED_ADMIN_EMAILS.has(email);
+    }
+    return user.isAdmin === true;
   } catch {
     return false;
   }

@@ -22,6 +22,7 @@ import {
   GlobalPixel,
   GlobalStats,
   isDeveloperAdmin,
+  isPlatformOwner,
   PixelHistoryEntry,
   PlayerProfile,
 } from '../types';
@@ -44,6 +45,9 @@ interface AdminPanelViewProps {
   onAdminDeleteUser: (userIdOrUsername: string, wipeContent: boolean) => Promise<void>;
   onAdminWipeUserPixels: (userIdOrUsername: string) => Promise<number>;
   onAdminUpdateUser: (updatedUser: PlayerProfile) => Promise<void>;
+  onAdminPromoteUser: (userId: string, promote: boolean) => Promise<{ ok: boolean; error?: string }>;
+  onAdminUpdatePasskey: (newPasskey: string) => Promise<{ ok: boolean; error?: string }>;
+  currentAdminPasskey?: string;
   onAdminCreateUser: (newUser: {
     username: string;
     displayName: string;
@@ -67,11 +71,14 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   artworks,
   comments,
   stats,
+  currentAdminPasskey,
   onAdminErasePixels,
   onAdminBatchPlacePixels,
   onAdminDeleteUser,
   onAdminWipeUserPixels,
   onAdminUpdateUser,
+  onAdminPromoteUser,
+  onAdminUpdatePasskey,
   onAdminCreateUser,
   onAdminDeleteArtwork,
   onAdminDeleteComment,
@@ -84,6 +91,13 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   const [subTab, setSubTab] = useState<'users' | 'canvas' | 'content' | 'system'>('users');
   const [userSearch, setUserSearch] = useState<string>('');
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  // Promote friend input
+  const [quickPromoteHandle, setQuickPromoteHandle] = useState<string>('');
+
+  // Passkey change inputs
+  const [newPasskeyInput, setNewPasskeyInput] = useState<string>('');
+  const [confirmPasskeyInput, setConfirmPasskeyInput] = useState<string>('');
 
   // Single coordinate moderation
   const [singleX, setSingleX] = useState<string>('500');
@@ -261,16 +275,20 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     showToast('👑 Exported full Dotwall JSON database backup!');
   };
 
-  const ADMIN_SECURITY_PASSKEY = '9945069081SUSzero';
+  const ADMIN_DEFAULT_PASSKEY = '9945069081SUSzero';
+  const effectivePasskey = (currentAdminPasskey || ADMIN_DEFAULT_PASSKEY).trim();
   const [isPasskeyUnlocked, setIsPasskeyUnlocked] = useState<boolean>(() => {
     return window.sessionStorage.getItem('dotwall_admin_passkey_unlocked') === 'true';
   });
   const [passkeyInput, setPasskeyInput] = useState<string>('');
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
 
+  const [promoteBusyId, setPromoteBusyId] = useState<string | null>(null);
+  const [passkeyChangeLoading, setPasskeyChangeLoading] = useState<boolean>(false);
+
   const handleUnlockPasskey = (e: React.FormEvent) => {
     e.preventDefault();
-    if (passkeyInput.trim() === ADMIN_SECURITY_PASSKEY) {
+    if (passkeyInput.trim() === effectivePasskey) {
       window.sessionStorage.setItem('dotwall_admin_passkey_unlocked', 'true');
       setIsPasskeyUnlocked(true);
       setPasskeyError(null);
@@ -285,6 +303,77 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     setIsPasskeyUnlocked(false);
     setPasskeyInput('');
     setPasskeyError(null);
+  };
+
+  const handleToggleAdmin = async (targetUser: PlayerProfile, promote: boolean) => {
+    if (isPlatformOwner(targetUser)) {
+      showToast(`👑 @${targetUser.username} is the permanent platform owner and cannot be modified.`);
+      return;
+    }
+    setPromoteBusyId(targetUser.id);
+    try {
+      const res = await onAdminPromoteUser(targetUser.id, promote);
+      if (res.ok) {
+        showToast(
+          promote
+            ? `👑 Successfully appointed @${targetUser.username} as Co-Administrator! 0s cooldown granted.`
+            : `🔻 Revoked administrator privileges for @${targetUser.username}.`
+        );
+      } else {
+        showToast(`❌ Error: ${res.error || 'Failed to update admin role'}`);
+      }
+    } catch (err: any) {
+      showToast(`❌ Error: ${err?.message || 'Operation failed'}`);
+    } finally {
+      setPromoteBusyId(null);
+    }
+  };
+
+  const handleQuickPromote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const query = quickPromoteHandle.trim().replace(/^@/, '').toLowerCase();
+    if (!query) return;
+    const target = allKnownUsers.find(
+      (u) => u.username.toLowerCase() === query || u.id.toLowerCase() === query
+    );
+    if (!target) {
+      showToast(`❌ Player "@${query}" not found among known players. Make sure they have logged in at least once.`);
+      return;
+    }
+    if (isPlatformOwner(target)) {
+      showToast(`👑 @${target.username} is already the permanent platform owner!`);
+      return;
+    }
+    await handleToggleAdmin(target, !target.isAdmin);
+    setQuickPromoteHandle('');
+  };
+
+  const handleChangePasskeySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanNew = newPasskeyInput.trim();
+    if (cleanNew.length < 6) {
+      showToast('❌ Admin passkey must be at least 6 characters long.');
+      return;
+    }
+    if (cleanNew !== confirmPasskeyInput.trim()) {
+      showToast('❌ New passkeys do not match. Please re-enter.');
+      return;
+    }
+    setPasskeyChangeLoading(true);
+    try {
+      const res = await onAdminUpdatePasskey(cleanNew);
+      if (res.ok) {
+        showToast('👑 Master Admin Passkey updated and secured across all sessions!');
+        setNewPasskeyInput('');
+        setConfirmPasskeyInput('');
+      } else {
+        showToast(`❌ Error updating passkey: ${res.error || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      showToast(`❌ Error: ${err?.message || 'Failed to update passkey'}`);
+    } finally {
+      setPasskeyChangeLoading(false);
+    }
   };
 
   if (!isAdmin) {
@@ -510,7 +599,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {filteredUsers.map((u) => {
-                const isUserAdmin = isDeveloperAdmin(u);
+                const isOwner = isPlatformOwner(u);
+                const isUserAdmin = isDeveloperAdmin(u) || u.isAdmin === true;
                 const isOnline = stats.onlinePlayers.some(
                   (p) => p.userId === u.id || p.username.toLowerCase() === u.username.toLowerCase()
                 );
@@ -530,7 +620,11 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                       gap: 12,
                       padding: 12,
                       borderRadius: 12,
-                      border: isUserAdmin ? '1.5px solid var(--accent)' : '1px solid var(--line)',
+                      border: isOwner
+                        ? '2px solid #FFD700'
+                        : isUserAdmin
+                        ? '1.5px solid var(--accent)'
+                        : '1px solid var(--line)',
                       background: 'var(--bg)',
                     }}
                   >
@@ -547,7 +641,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                         {u.avatarEmoji || '👾'}
                       </span>
                       <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <button
                             type="button"
                             className="inline-user-link"
@@ -556,9 +650,21 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                           >
                             @{u.username}
                           </button>
-                          {isUserAdmin && (
-                            <span className="genz-pill daily" style={{ fontSize: 10 }}>
-                              👑 DEV ADMIN
+                          {isOwner && (
+                            <span className="genz-pill daily" style={{ fontSize: 10, background: 'rgba(255, 215, 0, 0.2)', color: '#FFD700' }}>
+                              👑 PLATFORM OWNER
+                            </span>
+                          )}
+                          {!isOwner && isUserAdmin && (
+                            <span
+                              className="genz-pill accent"
+                              style={{
+                                fontSize: 10,
+                                background: 'rgba(107, 61, 255, 0.2)',
+                                color: 'var(--accent)',
+                              }}
+                            >
+                              👑 CO-ADMIN
                             </span>
                           )}
                           {isOnline && (
@@ -581,7 +687,35 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                      {/* Appoint / Revoke Co-Admin button */}
+                      {!isOwner && (
+                        <button
+                          type="button"
+                          className="tbtn"
+                          disabled={promoteBusyId === u.id}
+                          style={{
+                            borderColor: isUserAdmin ? 'rgba(255, 184, 0, 0.4)' : 'var(--accent)',
+                            color: isUserAdmin ? '#FFB800' : 'var(--accent)',
+                            background: isUserAdmin ? 'rgba(255, 184, 0, 0.08)' : 'rgba(107, 61, 255, 0.08)',
+                            fontWeight: 600,
+                          }}
+                          title={
+                            isUserAdmin
+                              ? 'Revoke administrator rights for this user'
+                              : 'Appoint user as Co-Administrator (grants 0s cooldown & Admin Panel)'
+                          }
+                          onClick={() => handleToggleAdmin(u, !isUserAdmin)}
+                        >
+                          <ShieldCheck size={12} />
+                          {promoteBusyId === u.id
+                            ? ' Updating...'
+                            : isUserAdmin
+                            ? ' Revoke Admin'
+                            : ' Make Co-Admin'}
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         className="tbtn"
@@ -611,7 +745,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                         <Eraser size={12} /> Wipe Pixels ({liveCanvasPixels})
                       </button>
 
-                      {!isUserAdmin && (
+                      {!isOwner && (
                         <>
                           <button
                             type="button"
@@ -653,8 +787,51 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             </div>
           </div>
 
-          {/* Right Column: Create / Spawn Custom User */}
-          <div className="card" style={{ alignSelf: 'start' }}>
+          {/* Right Column: Appoint Co-Admin Friend & Create / Spawn Custom User */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignSelf: 'start' }}>
+            {/* Quick Appoint Friend as Co-Admin */}
+            <div
+              className="card"
+              style={{
+                border: '1.5px solid var(--accent)',
+                background: 'linear-gradient(135deg, rgba(107, 61, 255, 0.08), var(--panel))',
+              }}
+            >
+              <h2>
+                <span>👑 Appoint Co-Administrator</span>
+                <span className="pick">Friend Privileges</span>
+              </h2>
+              <p style={{ color: 'var(--muted)', fontSize: 13, lineHeight: 1.5, margin: '4px 0 12px' }}>
+                Appoint your friend as a <b>Co-Administrator</b>. They will immediately receive <b>0.0s instant cooldown</b>, Erase &amp; Multi-brush tools, and full access to this Admin Command Center.
+              </p>
+              <form onSubmit={handleQuickPromote}>
+                <div className="form-group" style={{ marginBottom: 12 }}>
+                  <label className="form-label">Friend&apos;s @Username or UID</label>
+                  <input
+                    type="text"
+                    className="text-input"
+                    placeholder="e.g. cyber_artist or UID"
+                    value={quickPromoteHandle}
+                    onChange={(e) => setQuickPromoteHandle(e.target.value)}
+                    required
+                  />
+                  <small style={{ color: 'var(--muted)', fontSize: 11, display: 'block', marginTop: 4 }}>
+                    Your friend must have signed in with email or Google at least once so their profile is registered in the database.
+                  </small>
+                </div>
+                <button
+                  type="submit"
+                  className="go"
+                  style={{ width: '100%', justifyContent: 'center' }}
+                  disabled={promoteBusyId !== null}
+                >
+                  <ShieldCheck size={14} /> Promote Friend to Co-Admin
+                </button>
+              </form>
+            </div>
+
+            {/* Create / Spawn Player */}
+            <div className="card">
             <h2>
               <span>Create / Spawn Player</span>
               <span className="pick">Admin Tool</span>
@@ -741,6 +918,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             </form>
           </div>
         </div>
+      </div>
       )}
 
       {/* TAB 2: CANVAS & PIXEL MODERATION */}
@@ -1169,41 +1347,115 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             </form>
           </div>
 
-          <div className="card">
-            <h2>
-              <span>Database Snapshot &amp; Admin Privileges</span>
-              <span className="pick">UID: zero_sus</span>
-            </h2>
-            <p style={{ color: 'var(--muted)', fontSize: 13, lineHeight: 1.5 }}>
-              As <b>@zero_sus</b>, your account is permanently whitelisted as the Lead Developer &amp;
-              Administrator across the client, global real-time WebSocket relay, local server, and
-              Firebase security rules.
-            </p>
-            <ul className="feed" style={{ marginBottom: 16 }}>
-              <li>
-                <span>✅</span>
-                <span>
-                  <b>0s Cooldown Bypass:</b> Place or replace pixels continuously with zero wait.
-                </span>
-              </li>
-              <li>
-                <span>✅</span>
-                <span>
-                  <b>Canvas Erase &amp; Multi-Brush:</b> Use 1×1, 3×3, 5×5, or 10×10 brush to erase or
-                  paint.
-                </span>
-              </li>
-              <li>
-                <span>✅</span>
-                <span>
-                  <b>Real-Time User &amp; Content Deletion:</b> Syncs across every connected browser
-                  in &lt;200ms.
-                </span>
-              </li>
-            </ul>
-            <button type="button" className="btn primary" onClick={handleExportSnapshot}>
-              <Download size={15} /> Export Full Database JSON Snapshot
-            </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Master Admin Passkey Security Gate */}
+            <div
+              className="card"
+              style={{
+                border: '1.5px solid var(--accent)',
+                background: 'linear-gradient(135deg, rgba(107, 61, 255, 0.08), var(--panel))',
+              }}
+            >
+              <h2>
+                <span>🔐 Master Admin Passkey</span>
+                <span className="pick">Security Gate</span>
+              </h2>
+              <p style={{ color: 'var(--muted)', fontSize: 13, lineHeight: 1.5, margin: '4px 0 12px' }}>
+                Change the master passkey required to unlock this Developer &amp; Admin Command Center. This passkey is stored securely in Firebase Realtime Database at <code>system/adminPasskey</code> and synchronizes across all sessions.
+              </p>
+
+              <div
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  background: 'var(--bg)',
+                  border: '1px solid var(--line)',
+                  marginBottom: 14,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Active Console Passkey:</span>
+                <code style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent)' }}>
+                  {effectivePasskey.slice(0, 4)}•••••••• ({effectivePasskey.length} chars)
+                </code>
+              </div>
+
+              <form onSubmit={handleChangePasskeySubmit}>
+                <div className="form-group" style={{ marginBottom: 10 }}>
+                  <label className="form-label">New Admin Passkey (min 6 chars)</label>
+                  <input
+                    type="password"
+                    className="text-input"
+                    placeholder="Enter new admin passkey..."
+                    value={newPasskeyInput}
+                    onChange={(e) => setNewPasskeyInput(e.target.value)}
+                    minLength={6}
+                    required
+                  />
+                </div>
+
+                <div className="form-group" style={{ marginBottom: 14 }}>
+                  <label className="form-label">Confirm New Passkey</label>
+                  <input
+                    type="password"
+                    className="text-input"
+                    placeholder="Re-enter new admin passkey..."
+                    value={confirmPasskeyInput}
+                    onChange={(e) => setConfirmPasskeyInput(e.target.value)}
+                    minLength={6}
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="go"
+                  style={{ width: '100%', justifyContent: 'center' }}
+                  disabled={passkeyChangeLoading}
+                >
+                  <Lock size={14} /> {passkeyChangeLoading ? 'Saving to Firebase...' : 'Update Admin Passkey'}
+                </button>
+              </form>
+            </div>
+
+            <div className="card">
+              <h2>
+                <span>Database Snapshot &amp; Admin Privileges</span>
+                <span className="pick">UID: zero_sus</span>
+              </h2>
+              <p style={{ color: 'var(--muted)', fontSize: 13, lineHeight: 1.5 }}>
+                As <b>@zero_sus</b>, your account is permanently whitelisted as the Lead Developer &amp;
+                Administrator across the client, global real-time WebSocket relay, local server, and
+                Firebase security rules.
+              </p>
+              <ul className="feed" style={{ marginBottom: 16 }}>
+                <li>
+                  <span>✅</span>
+                  <span>
+                    <b>0s Cooldown Bypass:</b> Place or replace pixels continuously with zero wait.
+                  </span>
+                </li>
+                <li>
+                  <span>✅</span>
+                  <span>
+                    <b>Canvas Erase &amp; Multi-Brush:</b> Use 1×1, 3×3, 5×5, or 10×10 brush to erase or
+                    paint.
+                  </span>
+                </li>
+                <li>
+                  <span>✅</span>
+                  <span>
+                    <b>Real-Time User &amp; Content Deletion:</b> Syncs across every connected browser
+                    in &lt;200ms.
+                  </span>
+                </li>
+              </ul>
+              <button type="button" className="btn primary" onClick={handleExportSnapshot}>
+                <Download size={15} /> Export Full Database JSON Snapshot
+              </button>
+            </div>
           </div>
         </div>
       )}

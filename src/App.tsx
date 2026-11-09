@@ -59,7 +59,10 @@ import {
   adminDeleteCommentInFirebase,
   adminDeleteUserInFirebase,
   adminErasePixelsInFirebase,
+  adminPromoteUserInFirebase,
+  adminUpdatePasskeyInFirebase,
   adminUpdateUserInFirebase,
+  fetchAdminPasskeyFromFirebase,
   getEstimatedServerNow,
   limitToLast,
   onValue,
@@ -1927,6 +1930,71 @@ export function App() {
     [currentUser, pushNotification]
   );
 
+  const [adminPasskey, setAdminPasskey] = useState<string>('9945069081SUSzero');
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    try {
+      const db = getFirebaseDb();
+      const passkeyRef = ref(db, 'system/adminPasskey');
+      const unsub = onValue(
+        passkeyRef,
+        (snap) => {
+          if (snap.exists()) {
+            const val = snap.val();
+            if (typeof val === 'string' && val.trim().length >= 6) {
+              setAdminPasskey(val.trim());
+            }
+          }
+        },
+        () => {
+          // Fallback / ignore if unauthenticated or offline
+        }
+      );
+      return () => unsub();
+    } catch {
+      // ignore
+    }
+  }, [isAdmin]);
+
+  const handleAdminPromoteUser = useCallback(
+    async (userId: string, promote: boolean) => {
+      if (!isDeveloperAdmin(currentUser)) {
+        return { ok: false, error: 'Unauthorized: Only an administrator can assign admin roles.' };
+      }
+      const res = await adminPromoteUserInFirebase(currentUser, userId, promote);
+      if (res.ok) {
+        setUsers((prev) =>
+          prev.map((u) => {
+            if (u.id === userId) {
+              return { ...u, isAdmin: promote ? true : undefined };
+            }
+            return u;
+          })
+        );
+        if (currentUser && currentUser.id === userId) {
+          setCurrentUser((prev) => (prev ? { ...prev, isAdmin: promote ? true : undefined } : prev));
+        }
+      }
+      return res;
+    },
+    [currentUser]
+  );
+
+  const handleAdminUpdatePasskey = useCallback(
+    async (newPasskey: string) => {
+      if (!isDeveloperAdmin(currentUser)) {
+        return { ok: false, error: 'Unauthorized: Only an administrator can update the passkey.' };
+      }
+      const res = await adminUpdatePasskeyInFirebase(currentUser, newPasskey);
+      if (res.ok) {
+        setAdminPasskey(newPasskey.trim());
+      }
+      return res;
+    },
+    [currentUser]
+  );
+
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((n) => !n.read).length,
     [notifications]
@@ -2604,6 +2672,9 @@ export function App() {
           artworks={artworks}
           comments={comments}
           stats={stats}
+          currentAdminPasskey={adminPasskey}
+          onAdminPromoteUser={handleAdminPromoteUser}
+          onAdminUpdatePasskey={handleAdminUpdatePasskey}
           onAdminErasePixels={handleAdminErasePixels}
           onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
           onAdminDeleteUser={handleAdminDeleteUser}
