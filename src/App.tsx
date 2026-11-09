@@ -11,6 +11,7 @@ import {
   Palette,
   Search,
   Server,
+  ShieldCheck,
   Shuffle,
   Sparkles,
   Sun,
@@ -18,13 +19,14 @@ import {
   User,
   X,
 } from 'lucide-react';
-import type {
+import {
   AchievementItem,
   AppNotification,
   CommunityArtwork,
   CommunityComment,
   GlobalPixel,
   GlobalStats,
+  isDeveloperAdmin,
   NavTab,
   PixelHistoryEntry,
   PixelTask,
@@ -46,6 +48,10 @@ import {
 } from './firebase/auth';
 import { startUserPresenceSession, subscribeToOnlinePlayers } from './firebase/presence';
 import {
+  adminDeleteArtworkInFirebase,
+  adminDeleteCommentInFirebase,
+  adminDeleteUserInFirebase,
+  adminErasePixelsInFirebase,
   placePixelInFirebase,
   submitTaskInFirebase,
   undoLastPlacementInFirebase,
@@ -68,6 +74,7 @@ import { ExploreView } from './components/ExploreView';
 import { LeaderboardView } from './components/LeaderboardView';
 import { CommunityView } from './components/CommunityView';
 import { ProfileView } from './components/ProfileView';
+import { AdminPanelView } from './components/AdminPanelView';
 import { GlobalInsightsAndGuide } from './components/GlobalInsightsAndGuide';
 import { PixelArtworkPreview } from './components/PixelArtworkPreview';
 import { BackendConfigModal } from './components/BackendConfigModal';
@@ -227,9 +234,10 @@ export function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const isAdmin = isDeveloperAdmin(currentUser);
   const nextCooldownAt = currentUser?.nextCooldownAt || 0;
   const estimatedServerNow = nowTick + serverTimeOffsetMs;
-  const cooldownRemainingMs = Math.max(0, nextCooldownAt - estimatedServerNow);
+  const cooldownRemainingMs = isAdmin ? 0 : Math.max(0, nextCooldownAt - estimatedServerNow);
 
   const prevCooldownRef = useRef<number>(0);
   useEffect(() => {
@@ -297,8 +305,31 @@ export function App() {
     });
 
     const usersList = Object.values(seed.users) as PlayerProfile[];
+    if (!usersList.some((u) => u.id === 'zero_sus' || u.username === 'zero_sus')) {
+      const adminSeed: PlayerProfile = {
+        id: 'zero_sus',
+        username: 'zero_sus',
+        displayName: 'ZERO_SUS · Lead Developer & Admin',
+        avatarEmoji: '👑',
+        avatarColor: '#6B3DFF',
+        bio: 'Creator & Lead Developer of Dotwall 1000×1000. Full Admin & God-Mode Control.',
+        pixelsPlaced: 500,
+        tasksCompleted: 10,
+        points: 9999,
+        lastPixelAt: 0,
+        nextCooldownAt: 0,
+        joinedAt: Date.now() - 86400000 * 30,
+        achievements: ACHIEVEMENTS_CATALOG.map((a) => a.id),
+        isAdmin: true,
+      };
+      usersList.unshift(adminSeed);
+      seed.users.zero_sus = adminSeed;
+    }
+
     const savedUserId = window.localStorage.getItem(USER_ID_STORAGE_KEY);
-    let me = usersList.find((u) => u.id === savedUserId) || null;
+    let me =
+      usersList.find((u) => u.id === savedUserId || (savedUserId === 'zero_sus' && u.username === 'zero_sus')) ||
+      null;
     if (!me) {
       me = {
         id: `usr-${Date.now().toString(36)}`,
@@ -440,6 +471,10 @@ export function App() {
             // ignore auto-auth failure
           }
         }
+        return;
+      }
+      // Preserve explicit Developer Admin session (`zero_sus`) if active
+      if (window.localStorage.getItem(USER_ID_STORAGE_KEY) === 'zero_sus') {
         return;
       }
       try {
@@ -617,14 +652,98 @@ export function App() {
           prev.some((a) => a.id === artwork.id) ? prev : [artwork, ...prev]
         );
       },
+      onArtworkDeleted: (artworkId) => {
+        setArtworks((prev) => prev.filter((a) => a.id !== artworkId));
+      },
       onCommentPosted: (comment) => {
         setComments((prev) =>
           prev.some((c) => c.id === comment.id) ? prev : [...prev, comment]
         );
       },
+      onCommentDeleted: (commentId) => {
+        setComments((prev) => prev.filter((c) => c.id !== commentId));
+      },
+      onPixelsErased: (coords) => {
+        setPixelsMap((prev) => {
+          const next = new Map(prev);
+          for (const c of coords) {
+            next.delete(`${c.x},${c.y}`);
+          }
+          return next;
+        });
+      },
+      onPixelsBatchPlaced: (pixels) => {
+        setPixelsMap((prev) => {
+          const next = new Map(prev);
+          for (const px of pixels) {
+            next.set(`${px.x},${px.y}`, px);
+          }
+          return next;
+        });
+      },
+      onUserDeleted: (userId, username, wipeContent) => {
+        const cleanId = (userId || '').toLowerCase();
+        const cleanName = (username || '').toLowerCase().replace(/^@/, '');
+        setUsers((prev) =>
+          prev.filter(
+            (u) =>
+              u.id.toLowerCase() !== cleanId && u.username.toLowerCase() !== cleanName
+          )
+        );
+        if (wipeContent) {
+          setPixelsMap((prev) => {
+            const next = new Map(prev);
+            for (const [k, px] of next.entries()) {
+              if (
+                (px.ownerId || '').toLowerCase() === cleanId ||
+                (px.ownerUsername || '').toLowerCase() === cleanName
+              ) {
+                next.delete(k);
+              }
+            }
+            return next;
+          });
+          setArtworks((prev) =>
+            prev.filter(
+              (a) =>
+                a.creatorId.toLowerCase() !== cleanId &&
+                a.creatorUsername.toLowerCase() !== cleanName
+            )
+          );
+          setComments((prev) =>
+            prev.filter(
+              (c) =>
+                c.userId.toLowerCase() !== cleanId && c.username.toLowerCase() !== cleanName
+            )
+          );
+        }
+      },
+      onUserUpdated: (user) => {
+        setUsers((prev) =>
+          prev.some((u) => u.id === user.id)
+            ? prev.map((u) => (u.id === user.id ? user : u))
+            : [...prev, user]
+        );
+        setCurrentUser((me) => (me && me.id === user.id ? user : me));
+      },
+      onCanvasCleared: (mode) => {
+        if (mode === 'empty') {
+          setPixelsMap(new Map());
+        } else {
+          const seed = createInitialDatabaseSeed();
+          const map = new Map<string, GlobalPixel>();
+          Object.values(seed.pixels as Record<string, GlobalPixel>).forEach((px) => {
+            map.set(`${px.x},${px.y}`, px);
+          });
+          setPixelsMap(map);
+        }
+      },
+      onAdminBroadcast: (title, message) => {
+        pushNotification(title, message, '👑');
+      },
     });
     return () => unsubRelay();
-  }, []);
+  }, [pushNotification]);
 
   // Multi-tab BroadcastChannel sync for instant cross-tab updates
   useEffect(() => {
@@ -782,7 +901,8 @@ export function App() {
       }
 
       const now = Date.now();
-      if (currentUser.nextCooldownAt && now < currentUser.nextCooldownAt) {
+      const userIsAdmin = isDeveloperAdmin(currentUser);
+      if (!userIsAdmin && currentUser.nextCooldownAt && now < currentUser.nextCooldownAt) {
         const waitSec = Math.ceil((currentUser.nextCooldownAt - now) / 1000);
         return { ok: false, error: `Cooldown active! Wait ${waitSec}s.` };
       }
@@ -804,7 +924,7 @@ export function App() {
                 (currentUser.points || 0) +
                 (fbRes.historyEntry.actionType === 'replace' ? 12 : 10),
               lastPixelAt: now,
-              nextCooldownAt: fbRes.nextCooldownAt,
+              nextCooldownAt: userIsAdmin ? 0 : fbRes.nextCooldownAt,
             };
             setPixelsMap((prev) => {
               const next = new Map(prev);
@@ -903,7 +1023,7 @@ export function App() {
         pixelsPlaced: (currentUser.pixelsPlaced || 0) + 1,
         points: (currentUser.points || 0) + (isReplacement ? 12 : 10),
         lastPixelAt: now,
-        nextCooldownAt: now + COOLDOWN_SECONDS * 1000,
+        nextCooldownAt: userIsAdmin ? 0 : now + COOLDOWN_SECONDS * 1000,
         achievements: Array.from(
           new Set([
             ...(currentUser.achievements || []),
@@ -1353,16 +1473,60 @@ export function App() {
     [currentUser, connectionMode]
   );
 
-  // Full Login / Sign Up Handler (Firebase Auth `dotwall-13046` + Profile Sync)
+  // Full Login / Sign Up / Developer Admin Handler (Firebase Auth `dotwall-13046` + Profile Sync)
   const handleAuthAction = useCallback(
     async (payload: {
-      mode: 'login' | 'signup';
+      mode: 'login' | 'signup' | 'admin';
       email?: string;
       username: string;
       password?: string;
       avatarEmoji?: string;
       avatarColor?: string;
     }) => {
+      const requestedHandle = (payload.username || payload.email?.split('@')[0] || '')
+        .replace(/^@/, '')
+        .trim()
+        .toLowerCase();
+
+      if (payload.mode === 'admin' || requestedHandle === 'zero_sus') {
+        const existingAdmin = users.find(
+          (u) => u.id.toLowerCase() === 'zero_sus' || u.username.toLowerCase() === 'zero_sus'
+        );
+        const adminProfile: PlayerProfile = {
+          id: 'zero_sus',
+          username: 'zero_sus',
+          displayName: 'ZERO_SUS · Lead Developer & Admin',
+          avatarEmoji: '👑',
+          avatarColor: '#6B3DFF',
+          bio: 'Creator & Lead Developer of Dotwall 1000×1000. Full Admin & God-Mode Control.',
+          pixelsPlaced: existingAdmin?.pixelsPlaced ?? 500,
+          tasksCompleted: existingAdmin?.tasksCompleted ?? 10,
+          points: existingAdmin?.points ?? 9999,
+          lastPixelAt: 0,
+          nextCooldownAt: 0,
+          joinedAt: existingAdmin?.joinedAt ?? Date.now() - 86400000 * 30,
+          achievements: ACHIEVEMENTS_CATALOG.map((a) => a.id),
+          isAdmin: true,
+        };
+        window.localStorage.setItem(USER_ID_STORAGE_KEY, 'zero_sus');
+        setCurrentUser(adminProfile);
+        setUsers((prev) =>
+          prev.some((u) => u.id === 'zero_sus' || u.username.toLowerCase() === 'zero_sus')
+            ? prev.map((u) =>
+                u.id === 'zero_sus' || u.username.toLowerCase() === 'zero_sus' ? adminProfile : u
+              )
+            : [adminProfile, ...prev]
+        );
+        pushNotification(
+          '👑 Developer Admin Activated (@zero_sus)',
+          'Logged in with UID: zero_sus. 0s cooldown, Erase tool, and full User/Canvas Admin Panel unlocked!',
+          '👑',
+          'admin'
+        );
+        trackGameEvent('login', { method: 'admin_zero_sus' });
+        return { ok: true };
+      }
+
       let firebaseUid: string | null = null;
 
       if (payload.email && payload.password && payload.email.includes('@')) {
@@ -1529,6 +1693,306 @@ export function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
+  // =========================================================================
+  // DEVELOPER / ADMIN HANDLERS (`@zero_sus`) — REAL-TIME GLOBAL MODERATION
+  // =========================================================================
+  const handleAdminErasePixels = useCallback(
+    async (coords: { x: number; y: number }[]) => {
+      if (!coords || coords.length === 0) return { ok: true, count: 0 };
+      setPixelsMap((prev) => {
+        const next = new Map(prev);
+        for (const c of coords) {
+          next.delete(`${c.x},${c.y}`);
+        }
+        setStats(recomputeStatsFromState(next, users, artworks));
+        persistToLocalStore(next, users, history, taskSubmissions, artworks, comments);
+        return next;
+      });
+      await adminErasePixelsInFirebase(coords);
+      publishGlobalRelayEvent({
+        type: 'pixel_erased',
+        coords,
+        adminUsername: currentUser?.username || 'zero_sus',
+      });
+      return { ok: true, count: coords.length };
+    },
+    [
+      recomputeStatsFromState,
+      users,
+      artworks,
+      persistToLocalStore,
+      history,
+      taskSubmissions,
+      comments,
+      currentUser?.username,
+    ]
+  );
+
+  const handleAdminBatchPlacePixels = useCallback(
+    async (coords: { x: number; y: number }[], color: string) => {
+      if (!coords || coords.length === 0) return { ok: true, count: 0 };
+      const now = Date.now();
+      const ownerId = currentUser?.id || 'zero_sus';
+      const ownerUsername = currentUser?.username || 'zero_sus';
+      const cleanColor = color.toUpperCase();
+      const placedPixels: GlobalPixel[] = [];
+
+      setPixelsMap((prev) => {
+        const next = new Map(prev);
+        for (const c of coords) {
+          if (c.x >= 0 && c.x < 1000 && c.y >= 0 && c.y < 1000) {
+            const existing = next.get(`${c.x},${c.y}`);
+            const px: GlobalPixel = {
+              x: c.x,
+              y: c.y,
+              color: cleanColor,
+              ownerId,
+              ownerUsername,
+              version: existing ? existing.version + 1 : 1,
+              updatedAt: now,
+            };
+            next.set(`${c.x},${c.y}`, px);
+            placedPixels.push(px);
+          }
+        }
+        setStats(recomputeStatsFromState(next, users, artworks));
+        persistToLocalStore(next, users, history, taskSubmissions, artworks, comments);
+        return next;
+      });
+
+      publishGlobalRelayEvent({
+        type: 'pixels_batch_placed',
+        pixels: placedPixels,
+        adminUsername: ownerUsername,
+      });
+
+      return { ok: true, count: placedPixels.length };
+    },
+    [
+      currentUser?.id,
+      currentUser?.username,
+      recomputeStatsFromState,
+      users,
+      artworks,
+      persistToLocalStore,
+      history,
+      taskSubmissions,
+      comments,
+    ]
+  );
+
+  const handleAdminWipeUserPixels = useCallback(
+    async (userIdOrUsername: string) => {
+      const clean = userIdOrUsername.trim().replace(/^@/, '').toLowerCase();
+      const targetUser = users.find(
+        (u) => u.id.toLowerCase() === clean || u.username.toLowerCase() === clean
+      );
+      const targetId = (targetUser?.id || clean).toLowerCase();
+      const targetName = (targetUser?.username || clean).toLowerCase();
+
+      const coordsToRemove: { x: number; y: number }[] = [];
+      pixelsMap.forEach((px) => {
+        if (
+          (px.ownerId || '').toLowerCase() === targetId ||
+          (px.ownerUsername || '').toLowerCase() === targetName
+        ) {
+          coordsToRemove.push({ x: px.x, y: px.y });
+        }
+      });
+
+      if (coordsToRemove.length > 0) {
+        await handleAdminErasePixels(coordsToRemove);
+      }
+      return coordsToRemove.length;
+    },
+    [users, pixelsMap, handleAdminErasePixels]
+  );
+
+  const handleAdminDeleteUser = useCallback(
+    async (userIdOrUsername: string, wipeContent: boolean) => {
+      const clean = userIdOrUsername.trim().replace(/^@/, '').toLowerCase();
+      if (clean === 'zero_sus') return;
+
+      const targetUser = users.find(
+        (u) => u.id.toLowerCase() === clean || u.username.toLowerCase() === clean
+      );
+      const targetId = targetUser?.id || userIdOrUsername;
+      const targetName = targetUser?.username || userIdOrUsername.replace(/^@/, '');
+      const cleanId = targetId.toLowerCase();
+      const cleanName = targetName.toLowerCase();
+
+      const nextUsers = users.filter(
+        (u) => u.id.toLowerCase() !== cleanId && u.username.toLowerCase() !== cleanName
+      );
+      setUsers(nextUsers);
+
+      if (wipeContent) {
+        const coordsToRemove: { x: number; y: number }[] = [];
+        pixelsMap.forEach((px) => {
+          if (
+            (px.ownerId || '').toLowerCase() === cleanId ||
+            (px.ownerUsername || '').toLowerCase() === cleanName
+          ) {
+            coordsToRemove.push({ x: px.x, y: px.y });
+          }
+        });
+        if (coordsToRemove.length > 0) {
+          await adminErasePixelsInFirebase(coordsToRemove);
+        }
+        setPixelsMap((prev) => {
+          const next = new Map(prev);
+          for (const c of coordsToRemove) {
+            next.delete(`${c.x},${c.y}`);
+          }
+          const nextArts = artworks.filter(
+            (a) =>
+              a.creatorId.toLowerCase() !== cleanId &&
+              a.creatorUsername.toLowerCase() !== cleanName
+          );
+          const nextCmts = comments.filter(
+            (c) => c.userId.toLowerCase() !== cleanId && c.username.toLowerCase() !== cleanName
+          );
+          setArtworks(nextArts);
+          setComments(nextCmts);
+          setStats(recomputeStatsFromState(next, nextUsers, nextArts));
+          persistToLocalStore(next, nextUsers, history, taskSubmissions, nextArts, nextCmts);
+          return next;
+        });
+      } else {
+        setStats(recomputeStatsFromState(pixelsMap, nextUsers, artworks));
+        persistToLocalStore(pixelsMap, nextUsers, history, taskSubmissions, artworks, comments);
+      }
+
+      await adminDeleteUserInFirebase(targetId);
+      publishGlobalRelayEvent({
+        type: 'user_deleted',
+        userId: targetId,
+        username: targetName,
+        wipeContent,
+      });
+    },
+    [
+      users,
+      pixelsMap,
+      artworks,
+      comments,
+      recomputeStatsFromState,
+      persistToLocalStore,
+      history,
+      taskSubmissions,
+    ]
+  );
+
+  const handleAdminUpdateUser = useCallback(
+    async (updatedUser: PlayerProfile) => {
+      const nextUsers = users.some((u) => u.id === updatedUser.id)
+        ? users.map((u) => (u.id === updatedUser.id ? updatedUser : u))
+        : [...users, updatedUser];
+      setUsers(nextUsers);
+      if (currentUser && currentUser.id === updatedUser.id) {
+        setCurrentUser(updatedUser);
+      }
+      persistToLocalStore(pixelsMap, nextUsers, history, taskSubmissions, artworks, comments);
+      publishGlobalRelayEvent({
+        type: 'user_updated',
+        user: updatedUser,
+      });
+    },
+    [users, currentUser, persistToLocalStore, pixelsMap, history, taskSubmissions, artworks, comments]
+  );
+
+  const handleAdminCreateUser = useCallback(
+    async (payload: {
+      username: string;
+      displayName: string;
+      avatarEmoji: string;
+      avatarColor: string;
+      points: number;
+    }) => {
+      const created: PlayerProfile = {
+        id: `usr-${Date.now().toString(36)}`,
+        username: payload.username,
+        displayName: payload.displayName,
+        avatarEmoji: payload.avatarEmoji,
+        avatarColor: payload.avatarColor,
+        bio: 'Spawned by Developer Admin @zero_sus',
+        pixelsPlaced: 0,
+        tasksCompleted: 0,
+        points: payload.points,
+        lastPixelAt: 0,
+        nextCooldownAt: 0,
+        joinedAt: Date.now(),
+        achievements: ['first_dot'],
+      };
+      await handleAdminUpdateUser(created);
+    },
+    [handleAdminUpdateUser]
+  );
+
+  const handleAdminDeleteArtwork = useCallback(
+    async (artworkId: string) => {
+      const nextArts = artworks.filter((a) => a.id !== artworkId);
+      setArtworks(nextArts);
+      if (selectedExploreArtwork?.id === artworkId) {
+        setSelectedExploreArtwork(null);
+      }
+      persistToLocalStore(pixelsMap, users, history, taskSubmissions, nextArts, comments);
+      await adminDeleteArtworkInFirebase(artworkId);
+      publishGlobalRelayEvent({
+        type: 'artwork_deleted',
+        artworkId,
+      });
+    },
+    [artworks, selectedExploreArtwork?.id, persistToLocalStore, pixelsMap, users, history, taskSubmissions, comments]
+  );
+
+  const handleAdminDeleteComment = useCallback(
+    async (commentId: string) => {
+      const nextCmts = comments.filter((c) => c.id !== commentId);
+      setComments(nextCmts);
+      persistToLocalStore(pixelsMap, users, history, taskSubmissions, artworks, nextCmts);
+      await adminDeleteCommentInFirebase(commentId);
+      publishGlobalRelayEvent({
+        type: 'comment_deleted',
+        commentId,
+      });
+    },
+    [comments, persistToLocalStore, pixelsMap, users, history, taskSubmissions, artworks]
+  );
+
+  const handleAdminClearCanvas = useCallback(
+    async (mode: 'empty' | 'seed') => {
+      const nextMap = new Map<string, GlobalPixel>();
+      if (mode === 'seed') {
+        const seed = createInitialDatabaseSeed();
+        Object.values(seed.pixels as Record<string, GlobalPixel>).forEach((px) => {
+          nextMap.set(`${px.x},${px.y}`, px);
+        });
+      }
+      setPixelsMap(nextMap);
+      setStats(recomputeStatsFromState(nextMap, users, artworks));
+      persistToLocalStore(nextMap, users, history, taskSubmissions, artworks, comments);
+      publishGlobalRelayEvent({
+        type: 'canvas_cleared',
+        mode,
+      });
+    },
+    [recomputeStatsFromState, users, artworks, persistToLocalStore, history, taskSubmissions, comments]
+  );
+
+  const handleAdminBroadcast = useCallback(
+    async (title: string, message: string) => {
+      pushNotification(title, message, '👑');
+      publishGlobalRelayEvent({
+        type: 'admin_broadcast',
+        title,
+        message,
+        timestamp: Date.now(),
+      });
+    },
+    [pushNotification]
+  );
+
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((n) => !n.read).length,
     [notifications]
@@ -1566,6 +2030,7 @@ export function App() {
     { id: 'leaderboard', label: 'Leaderboard', icon: <Trophy size={14} /> },
     { id: 'community', label: 'Community', icon: <MessageSquare size={14} /> },
     { id: 'profile', label: 'Profile', icon: <User size={14} /> },
+    { id: 'admin', label: '👑 Admin', icon: <ShieldCheck size={14} /> },
   ];
 
   const isCurrentlyDark =
@@ -1989,6 +2454,10 @@ export function App() {
               nextCooldownAt={nextCooldownAt}
               onPlacePixel={handlePlacePixel}
               onUndoPixel={handleUndoPixel}
+              onAdminErasePixels={handleAdminErasePixels}
+              onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
+              onAdminDeleteUser={handleAdminDeleteUser}
+              onOpenAdminPanel={() => setActiveTab('admin')}
               onInspectPlayer={handleInspectPlayer}
               onVisibleChunksChange={setVisibleChunkIds}
             />
@@ -2039,6 +2508,10 @@ export function App() {
             nextCooldownAt={nextCooldownAt}
             onPlacePixel={handlePlacePixel}
             onUndoPixel={handleUndoPixel}
+            onAdminErasePixels={handleAdminErasePixels}
+            onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
+            onAdminDeleteUser={handleAdminDeleteUser}
+            onOpenAdminPanel={() => setActiveTab('admin')}
             onInspectPlayer={handleInspectPlayer}
             onVisibleChunksChange={setVisibleChunkIds}
           />
@@ -2124,6 +2597,40 @@ export function App() {
             setSelectedExploreArtwork(art);
             setActiveTab('explore');
           }}
+        />
+      )}
+
+      {/* VIEW 8: DEVELOPER & ADMIN COMMAND CENTER (@zero_sus) */}
+      {activeTab === 'admin' && (
+        <AdminPanelView
+          currentUser={currentUser}
+          users={users}
+          pixelsMap={pixelsMap}
+          history={history}
+          artworks={artworks}
+          comments={comments}
+          stats={stats}
+          onLoginAsAdmin={async () => {
+            await handleAuthAction({
+              mode: 'admin',
+              username: 'zero_sus',
+              email: 'zero_sus@dotwall.app',
+              avatarEmoji: '👑',
+              avatarColor: '#6B3DFF',
+            });
+          }}
+          onAdminErasePixels={handleAdminErasePixels}
+          onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
+          onAdminDeleteUser={handleAdminDeleteUser}
+          onAdminWipeUserPixels={handleAdminWipeUserPixels}
+          onAdminUpdateUser={handleAdminUpdateUser}
+          onAdminCreateUser={handleAdminCreateUser}
+          onAdminDeleteArtwork={handleAdminDeleteArtwork}
+          onAdminDeleteComment={handleAdminDeleteComment}
+          onAdminClearCanvas={handleAdminClearCanvas}
+          onAdminBroadcast={handleAdminBroadcast}
+          onInspectPlayer={handleInspectPlayer}
+          onJumpToCanvas={() => setActiveTab('wall')}
         />
       )}
 
@@ -2252,6 +2759,7 @@ export function App() {
         onPasswordReset={handleResetPassword}
         onLogout={handleLogout}
         onOpenCloudConfig={() => setShowBackendModal(true)}
+        onOpenAdminPanel={() => setActiveTab('admin')}
       />
 
       {/* FIREBASE / SUPABASE CLOUD CONFIGURATION MODAL */}
@@ -2274,6 +2782,13 @@ export function App() {
           {stats.pixelsUsed.toLocaleString()} pixels placed
         </span>
         <span style={{ display: 'flex', gap: 10 }}>
+          <button
+            type="button"
+            className="mini-link-btn"
+            onClick={() => setActiveTab('admin')}
+          >
+            👑 Admin Panel (@zero_sus)
+          </button>
           <button
             type="button"
             className="mini-link-btn"

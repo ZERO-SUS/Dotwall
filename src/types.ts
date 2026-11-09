@@ -5,7 +5,8 @@ export type NavTab =
   | 'explore'
   | 'leaderboard'
   | 'community'
-  | 'profile';
+  | 'profile'
+  | 'admin';
 
 export type CanvasTool = 'place' | 'pick' | 'erase' | 'pan';
 
@@ -50,6 +51,16 @@ export interface PlayerProfile {
   lastCommentAt?: number;
   joinedAt: number;
   achievements: string[];
+  isAdmin?: boolean;
+  banned?: boolean;
+}
+
+export function isDeveloperAdmin(user: PlayerProfile | null | undefined): boolean {
+  if (!user) return false;
+  if (user.isAdmin) return true;
+  const uid = (user.id || '').trim().toLowerCase();
+  const uname = (user.username || '').trim().toLowerCase().replace(/^@/, '');
+  return uid === 'zero_sus' || uname === 'zero_sus';
 }
 
 export interface OnlinePlayerPresence {

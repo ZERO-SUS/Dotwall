@@ -447,4 +447,54 @@ export async function submitTaskInFirebase(params: {
   };
 }
 
+export async function adminErasePixelsInFirebase(coords: { x: number; y: number }[]): Promise<void> {
+  try {
+    const db = getFirebaseDb();
+    const multiUpdates: Record<string, null> = {};
+    for (const c of coords) {
+      if (c.x >= 0 && c.x < 1000 && c.y >= 0 && c.y < 1000) {
+        const chunkId = getChunkId(c.x, c.y);
+        multiUpdates[`canvas/chunks/${chunkId}/${c.x}_${c.y}`] = null;
+        multiUpdates[`canvasChunks/${chunkId}/${c.x}_${c.y}`] = null;
+      }
+    }
+    if (Object.keys(multiUpdates).length > 0) {
+      await update(ref(db), multiUpdates);
+    }
+  } catch {
+    // ignore if rules locked
+  }
+}
+
+export async function adminDeleteUserInFirebase(userId: string): Promise<void> {
+  try {
+    const db = getFirebaseDb();
+    await update(ref(db), {
+      [`users/${userId}`]: null,
+      [`cooldowns/${userId}`]: null,
+      [`presence/${userId}`]: null,
+    });
+  } catch {
+    // ignore if rules locked
+  }
+}
+
+export async function adminDeleteArtworkInFirebase(artworkId: string): Promise<void> {
+  try {
+    const db = getFirebaseDb();
+    await set(ref(db, `artworks/${artworkId}`), null);
+  } catch {
+    // ignore
+  }
+}
+
+export async function adminDeleteCommentInFirebase(commentId: string): Promise<void> {
+  try {
+    const db = getFirebaseDb();
+    await set(ref(db, `comments/${commentId}`), null);
+  } catch {
+    // ignore
+  }
+}
+
 export { ref, get, set, update, push, onValue, runTransaction, query, limitToLast, type Unsubscribe };

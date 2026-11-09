@@ -13,13 +13,22 @@ import {
   Play,
   Pipette,
   Redo2,
+  ShieldCheck,
   Shuffle,
   Sparkles,
+  Trash2,
   Undo2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import type { CanvasTool, GlobalPixel, GlobalStats, PixelHistoryEntry, PlayerProfile } from '../types';
+import {
+  CanvasTool,
+  GlobalPixel,
+  GlobalStats,
+  isDeveloperAdmin,
+  PixelHistoryEntry,
+  PlayerProfile,
+} from '../types';
 import { CANVAS_SIZE, COOLDOWN_SECONDS, DOTWALL_PALETTE, getColorName } from '../constants';
 import { exportGlobalCanvasPng } from '../utils/exportPng';
 import { getVisibleChunkIds } from '../firebase/database';
@@ -34,6 +43,13 @@ interface GlobalCanvasWorkspaceProps {
   onPlacePixel: (x: number, y: number, color: string) => Promise<{ ok: boolean; error?: string }>;
   onUndoPixel?: () => Promise<{ ok: boolean; error?: string; x?: number; y?: number }>;
   onRedoPixel?: () => Promise<{ ok: boolean; error?: string; x?: number; y?: number }>;
+  onAdminErasePixels?: (coords: { x: number; y: number }[]) => Promise<{ ok: boolean; count?: number }>;
+  onAdminBatchPlacePixels?: (
+    coords: { x: number; y: number }[],
+    color: string
+  ) => Promise<{ ok: boolean; count?: number }>;
+  onAdminDeleteUser?: (userIdOrUsername: string, wipeContent: boolean) => Promise<void>;
+  onOpenAdminPanel?: () => void;
   onInspectPlayer: (username: string) => void;
   onVisibleChunksChange?: (chunkIds: string[]) => void;
   compactMode?: boolean;
@@ -49,10 +65,16 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   onPlacePixel,
   onUndoPixel,
   onRedoPixel,
+  onAdminErasePixels,
+  onAdminBatchPlacePixels,
+  onAdminDeleteUser,
+  onOpenAdminPanel,
   onInspectPlayer,
   onVisibleChunksChange,
   compactMode = false,
 }) => {
+  const isAdmin = isDeveloperAdmin(currentUser);
+  const [adminBrushSize, setAdminBrushSize] = useState<1 | 3 | 5 | 10>(1);
   const [selectedCoord, setSelectedCoord] = useState<{ x: number; y: number }>({ x: 490, y: 490 });
   const [hoverCoord, setHoverCoord] = useState<{ x: number; y: number } | null>(null);
 
@@ -391,10 +413,66 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     setRecentColors((prev) => [clean, ...prev.filter((c) => c !== clean)].slice(0, 8));
   }, []);
 
+  const getBrushCoords = useCallback(
+    (centerX: number, centerY: number, size: number) => {
+      const coords: { x: number; y: number }[] = [];
+      const half = Math.floor(size / 2);
+      for (let dx = 0; dx < size; dx++) {
+        for (let dy = 0; dy < size; dy++) {
+          const nx = centerX - half + dx;
+          const ny = centerY - half + dy;
+          if (nx >= 0 && nx < CANVAS_SIZE && ny >= 0 && ny < CANVAS_SIZE) {
+            coords.push({ x: nx, y: ny });
+          }
+        }
+      }
+      return coords;
+    },
+    []
+  );
+
+  const handleAdminEraseAt = useCallback(
+    async (targetX = selectedCoord.x, targetY = selectedCoord.y) => {
+      if (!isAdmin || !onAdminErasePixels || isSubmitting) return;
+      const coords = getBrushCoords(targetX, targetY, adminBrushSize);
+      setIsSubmitting(true);
+      const res = await onAdminErasePixels(coords);
+      setIsSubmitting(false);
+      if (res.ok) {
+        setStatusMsg({
+          text:
+            coords.length > 1
+              ? `👑 Admin erased ${adminBrushSize}×${adminBrushSize} region centered at (${targetX}, ${targetY})!`
+              : `👑 Admin erased pixel at (${targetX}, ${targetY})!`,
+          kind: 'good',
+        });
+      }
+    },
+    [isAdmin, onAdminErasePixels, isSubmitting, selectedCoord.x, selectedCoord.y, getBrushCoords, adminBrushSize]
+  );
+
   const handleCommitPlace = useCallback(
     async (targetX = selectedCoord.x, targetY = selectedCoord.y) => {
       if (isSubmitting) return;
-      if (cooldownRemainingMs > 0) {
+      if (isAdmin && tool === 'erase' && onAdminErasePixels) {
+        await handleAdminEraseAt(targetX, targetY);
+        return;
+      }
+      if (isAdmin && adminBrushSize > 1 && onAdminBatchPlacePixels) {
+        const coords = getBrushCoords(targetX, targetY, adminBrushSize);
+        setIsSubmitting(true);
+        const res = await onAdminBatchPlacePixels(coords, selectedColor);
+        setIsSubmitting(false);
+        if (res.ok) {
+          selectColorWithHistory(selectedColor);
+          setStatusMsg({
+            text: `👑 Admin painted ${adminBrushSize}×${adminBrushSize} (${coords.length} px) at (${targetX}, ${targetY}) with ${selectedColor}!`,
+            kind: 'good',
+          });
+        }
+        return;
+      }
+      if (!isAdmin && cooldownRemainingMs > 0) {
         setStatusMsg({
           text: `Cooldown active! Wait ${(cooldownRemainingMs / 1000).toFixed(1)}s before placing your next pixel.`,
           kind: 'error',
@@ -423,6 +501,13 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     },
     [
       isSubmitting,
+      isAdmin,
+      tool,
+      onAdminErasePixels,
+      handleAdminEraseAt,
+      adminBrushSize,
+      onAdminBatchPlacePixels,
+      getBrushCoords,
       cooldownRemainingMs,
       pixelsMap,
       onPlacePixel,
@@ -539,8 +624,12 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
           kind: 'info',
         });
       }
-    } else if (tool === 'place' && instantPlaceOnClick && cooldownRemainingMs <= 0) {
-      handleCommitPlace(coord.x, coord.y);
+    } else if (isAdmin && tool === 'erase') {
+      handleAdminEraseAt(coord.x, coord.y);
+    } else if (tool === 'place' && (instantPlaceOnClick || isAdmin) && (cooldownRemainingMs <= 0 || isAdmin)) {
+      if (instantPlaceOnClick) {
+        handleCommitPlace(coord.x, coord.y);
+      }
     }
   };
 
@@ -765,6 +854,16 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
             >
               <Pipette size={13} /> Eyedropper
             </button>
+            {isAdmin && (
+              <button
+                type="button"
+                aria-pressed={tool === 'erase'}
+                onClick={() => setTool('erase')}
+                title="Admin Erase Pixel Tool (X)"
+              >
+                <Trash2 size={13} /> Erase
+              </button>
+            )}
             <button
               type="button"
               aria-pressed={tool === 'pan'}
@@ -774,6 +873,33 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
               <Hand size={13} /> Pan
             </button>
           </div>
+
+          {isAdmin && (
+            <div className="seg" role="group" aria-label="Admin Brush Size">
+              {([1, 3, 5, 10] as const).map((sz) => (
+                <button
+                  key={sz}
+                  type="button"
+                  aria-pressed={adminBrushSize === sz}
+                  onClick={() => setAdminBrushSize(sz)}
+                  title={`Admin Brush Size ${sz}×${sz}`}
+                >
+                  {sz}×{sz}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {isAdmin && onOpenAdminPanel && (
+            <button
+              type="button"
+              className="tbtn primary-outline"
+              onClick={onOpenAdminPanel}
+              title="Open Developer & Admin Panel"
+            >
+              <ShieldCheck size={13} /> 👑 Admin Panel
+            </button>
+          )}
 
           {onUndoPixel && (
             <div className="seg" role="group" aria-label="Safe History">
@@ -1087,7 +1213,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
           <div className="card">
             <h2>
               <span>Placement Charge</span>
-              <span className="pick">30s UID Cooldown</span>
+              <span className="pick">{isAdmin ? '👑 0s Admin God-Mode' : '30s UID Cooldown'}</span>
             </h2>
             <div className="charge">
               <div className="ring" aria-hidden="true">
@@ -1099,23 +1225,25 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                     cy="36"
                     r="30"
                     strokeDasharray={circumference}
-                    strokeDashoffset={strokeDashoffset}
+                    strokeDashoffset={isAdmin ? 0 : strokeDashoffset}
                   />
                   <text className="rt" x="36" y="41">
-                    {cooldownRemainingMs > 0 ? `${cooldownSecondsDisplay}s` : 'GO'}
+                    {!isAdmin && cooldownRemainingMs > 0 ? `${cooldownSecondsDisplay}s` : 'GO'}
                   </text>
                 </svg>
               </div>
               <div>
                 <div className="state">
-                  {cooldownRemainingMs > 0
+                  {!isAdmin && cooldownRemainingMs > 0
                     ? `Recharging...`
-                    : inspectedPixel
-                      ? 'Ready to Replace'
-                      : 'Ready to Place'}
+                    : tool === 'erase' && isAdmin
+                      ? `Ready to Erase (${adminBrushSize}×${adminBrushSize})`
+                      : inspectedPixel
+                        ? 'Ready to Replace'
+                        : 'Ready to Place'}
                 </div>
                 <div className="hint">
-                  {cooldownRemainingMs > 0
+                  {!isAdmin && cooldownRemainingMs > 0
                     ? `Next available at ${nextAvailableTimeString}`
                     : `Target (${selectedCoord.x}, ${selectedCoord.y}) selected`}
                 </div>
@@ -1125,14 +1253,18 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
             <button
               type="button"
               className="go"
-              disabled={cooldownRemainingMs > 0 || isSubmitting}
+              disabled={(!isAdmin && cooldownRemainingMs > 0) || isSubmitting}
               onClick={() => handleCommitPlace()}
             >
-              {cooldownRemainingMs > 0
+              {!isAdmin && cooldownRemainingMs > 0
                 ? `Next pixel in ${cooldownSecondsDisplay}s`
-                : inspectedPixel
-                  ? `Replace (${selectedCoord.x}, ${selectedCoord.y}) with ${getColorName(selectedColor)}`
-                  : `Place ${getColorName(selectedColor)} at (${selectedCoord.x}, ${selectedCoord.y})`}
+                : isAdmin && tool === 'erase'
+                  ? `🗑️ Erase ${adminBrushSize}×${adminBrushSize} at (${selectedCoord.x}, ${selectedCoord.y})`
+                  : isAdmin && adminBrushSize > 1
+                    ? `👑 Paint ${adminBrushSize}×${adminBrushSize} at (${selectedCoord.x}, ${selectedCoord.y})`
+                    : inspectedPixel
+                      ? `Replace (${selectedCoord.x}, ${selectedCoord.y}) with ${getColorName(selectedColor)}`
+                      : `Place ${getColorName(selectedColor)} at (${selectedCoord.x}, ${selectedCoord.y})`}
             </button>
 
             <p className="msg" data-kind={statusMsg.kind === 'error' ? 'error' : undefined}>
@@ -1256,7 +1388,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                   <dt>Capacity Rule</dt>
                   <dd>Replacing consumes 0 new slots</dd>
                 </dl>
-                <div className="insp-actions">
+                <div className="insp-actions" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <button
                     type="button"
                     className="insp-use"
@@ -1264,6 +1396,32 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                   >
                     Copy Color ({inspectedPixel.color})
                   </button>
+                  {isAdmin && onAdminErasePixels && (
+                    <button
+                      type="button"
+                      className="tbtn"
+                      style={{ width: '100%', justifyContent: 'center', color: '#E53935' }}
+                      onClick={() => handleAdminEraseAt(inspectedPixel.x, inspectedPixel.y)}
+                    >
+                      <Trash2 size={13} /> 👑 Erase Pixel ({inspectedPixel.x}, {inspectedPixel.y})
+                    </button>
+                  )}
+                  {isAdmin && onAdminDeleteUser && inspectedPixel.ownerUsername !== 'zero_sus' && (
+                    <button
+                      type="button"
+                      className="tbtn"
+                      style={{ width: '100%', justifyContent: 'center', color: '#E53935' }}
+                      onClick={() => {
+                        onAdminDeleteUser(inspectedPixel.ownerId || inspectedPixel.ownerUsername, true);
+                        setStatusMsg({
+                          text: `👑 Deleted @${inspectedPixel.ownerUsername} and wiped all their pixels!`,
+                          kind: 'good',
+                        });
+                      }}
+                    >
+                      <Trash2 size={13} /> 👑 Delete @{inspectedPixel.ownerUsername} &amp; Wipe Pixels
+                    </button>
+                  )}
                 </div>
               </>
             ) : (

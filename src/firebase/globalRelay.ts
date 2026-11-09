@@ -28,15 +28,79 @@ export type GlobalRelayEvent =
       historyId: string;
     }
   | {
+      type: 'pixel_erased';
+      senderTabId: string;
+      coords: { x: number; y: number }[];
+      adminUsername: string;
+    }
+  | {
+      type: 'pixels_batch_placed';
+      senderTabId: string;
+      pixels: GlobalPixel[];
+      adminUsername: string;
+    }
+  | {
+      type: 'user_deleted';
+      senderTabId: string;
+      userId: string;
+      username: string;
+      wipeContent: boolean;
+    }
+  | {
+      type: 'user_updated';
+      senderTabId: string;
+      user: PlayerProfile;
+    }
+  | {
       type: 'artwork_published';
       senderTabId: string;
       artwork: CommunityArtwork;
     }
   | {
+      type: 'artwork_deleted';
+      senderTabId: string;
+      artworkId: string;
+    }
+  | {
       type: 'comment_posted';
       senderTabId: string;
       comment: CommunityComment;
+    }
+  | {
+      type: 'comment_deleted';
+      senderTabId: string;
+      commentId: string;
+    }
+  | {
+      type: 'canvas_cleared';
+      senderTabId: string;
+      mode: 'empty' | 'seed';
+    }
+  | {
+      type: 'admin_broadcast';
+      senderTabId: string;
+      title: string;
+      message: string;
+      timestamp: number;
     };
+
+export type DistributeOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
+
+export interface GlobalRelayCallbacks {
+  onPixelPlaced: (pixel: GlobalPixel, historyEntry: PixelHistoryEntry) => void;
+  onPixelUndone: (x: number, y: number, restoredPixel: GlobalPixel | null, historyId: string) => void;
+  onPixelsErased?: (coords: { x: number; y: number }[], adminUsername: string) => void;
+  onPixelsBatchPlaced?: (pixels: GlobalPixel[], adminUsername: string) => void;
+  onUserDeleted?: (userId: string, username: string, wipeContent: boolean) => void;
+  onUserUpdated?: (user: PlayerProfile) => void;
+  onArtworkPublished: (artwork: CommunityArtwork) => void;
+  onArtworkDeleted?: (artworkId: string) => void;
+  onCommentPosted: (comment: CommunityComment) => void;
+  onCommentDeleted?: (commentId: string) => void;
+  onCanvasCleared?: (mode: 'empty' | 'seed') => void;
+  onAdminBroadcast?: (title: string, message: string, timestamp: number) => void;
+  onConnectionState?: (connected: boolean) => void;
+}
 
 const CLIENT_TAB_ID = `tab_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -45,16 +109,11 @@ export function getClientTabId(): string {
 }
 
 /**
- * Publishes a validated canvas/game event to the global real-time cloud relay
- * so all connected browsers/devices worldwide receive it in <200ms even if
- * Firebase Console RTDB rules are still in default locked mode.
+ * Publishes a validated canvas/game/admin event to the global real-time cloud relay
+ * so all connected browsers/devices worldwide receive it in <200ms.
  */
 export async function publishGlobalRelayEvent(
-  event:
-    | Omit<Extract<GlobalRelayEvent, { type: 'pixel_placed' }>, 'senderTabId'>
-    | Omit<Extract<GlobalRelayEvent, { type: 'pixel_undone' }>, 'senderTabId'>
-    | Omit<Extract<GlobalRelayEvent, { type: 'artwork_published' }>, 'senderTabId'>
-    | Omit<Extract<GlobalRelayEvent, { type: 'comment_posted' }>, 'senderTabId'>
+  event: DistributeOmit<GlobalRelayEvent, 'senderTabId'>
 ): Promise<void> {
   try {
     const payload: GlobalRelayEvent = {
@@ -73,15 +132,10 @@ export async function publishGlobalRelayEvent(
 
 /**
  * Fetches recent global history from the cloud relay on startup so any new browser/device
- * opening https://zero-sus.github.io/Dotwall/ immediately sees pixels, artworks, and comments
- * placed by other players worldwide.
+ * opening https://zero-sus.github.io/Dotwall/ immediately sees pixels, erasures, user deletions,
+ * artworks, and comments placed by players and admins worldwide.
  */
-export async function fetchGlobalRelayHistory(callbacks: {
-  onPixelPlaced: (pixel: GlobalPixel, historyEntry: PixelHistoryEntry) => void;
-  onPixelUndone: (x: number, y: number, restoredPixel: GlobalPixel | null, historyId: string) => void;
-  onArtworkPublished: (artwork: CommunityArtwork) => void;
-  onCommentPosted: (comment: CommunityComment) => void;
-}): Promise<void> {
+export async function fetchGlobalRelayHistory(callbacks: GlobalRelayCallbacks): Promise<void> {
   try {
     const res = await fetch(`${RELAY_HTTP_BASE}/${CANVAS_TOPIC}/json?poll=1&since=all`);
     if (!res.ok) return;
@@ -105,17 +159,7 @@ export async function fetchGlobalRelayHistory(callbacks: {
 
 function applyRelayMessage(
   msg: GlobalRelayEvent,
-  callbacks: {
-    onPixelPlaced: (pixel: GlobalPixel, historyEntry: PixelHistoryEntry) => void;
-    onPixelUndone: (
-      x: number,
-      y: number,
-      restoredPixel: GlobalPixel | null,
-      historyId: string
-    ) => void;
-    onArtworkPublished: (artwork: CommunityArtwork) => void;
-    onCommentPosted: (comment: CommunityComment) => void;
-  },
+  callbacks: GlobalRelayCallbacks,
   isReplay = false
 ) {
   if (!isReplay && msg.senderTabId === CLIENT_TAB_ID) return;
@@ -136,29 +180,43 @@ function applyRelayMessage(
     }
   } else if (msg.type === 'pixel_undone' && typeof msg.x === 'number' && typeof msg.y === 'number') {
     callbacks.onPixelUndone(msg.x, msg.y, msg.restoredPixel || null, msg.historyId || '');
+  } else if (msg.type === 'pixel_erased' && Array.isArray(msg.coords)) {
+    callbacks.onPixelsErased?.(msg.coords, msg.adminUsername || 'zero_sus');
+  } else if (msg.type === 'pixels_batch_placed' && Array.isArray(msg.pixels)) {
+    callbacks.onPixelsBatchPlaced?.(msg.pixels, msg.adminUsername || 'zero_sus');
+  } else if (msg.type === 'user_deleted' && (msg.userId || msg.username)) {
+    callbacks.onUserDeleted?.(msg.userId || '', msg.username || '', Boolean(msg.wipeContent));
+  } else if (msg.type === 'user_updated' && msg.user) {
+    callbacks.onUserUpdated?.(msg.user);
   } else if (msg.type === 'artwork_published' && msg.artwork) {
     callbacks.onArtworkPublished(msg.artwork);
+  } else if (msg.type === 'artwork_deleted' && msg.artworkId) {
+    callbacks.onArtworkDeleted?.(msg.artworkId);
   } else if (msg.type === 'comment_posted' && msg.comment) {
     callbacks.onCommentPosted(msg.comment);
+  } else if (msg.type === 'comment_deleted' && msg.commentId) {
+    callbacks.onCommentDeleted?.(msg.commentId);
+  } else if (msg.type === 'canvas_cleared' && msg.mode) {
+    callbacks.onCanvasCleared?.(msg.mode);
+  } else if (msg.type === 'admin_broadcast' && !isReplay && msg.message) {
+    callbacks.onAdminBroadcast?.(
+      msg.title || '👑 Admin Announcement (@zero_sus)',
+      msg.message,
+      msg.timestamp || Date.now()
+    );
   }
 }
 
 /**
  * Subscribes to live WebSocket stream (`wss://ntfy.sh/.../ws`) with automatic reconnect
- * so pixels placed on any device worldwide appear in real time (< 150ms).
+ * so pixels placed/erased and admin actions on any device worldwide appear in real time (< 150ms).
  */
-export function subscribeToGlobalRelayStream(callbacks: {
-  onPixelPlaced: (pixel: GlobalPixel, historyEntry: PixelHistoryEntry) => void;
-  onPixelUndone: (x: number, y: number, restoredPixel: GlobalPixel | null, historyId: string) => void;
-  onArtworkPublished: (artwork: CommunityArtwork) => void;
-  onCommentPosted: (comment: CommunityComment) => void;
-  onConnectionState?: (connected: boolean) => void;
-}): () => void {
+export function subscribeToGlobalRelayStream(callbacks: GlobalRelayCallbacks): () => void {
   let ws: WebSocket | null = null;
   let closedByApp = false;
   let reconnectTimer: number | null = null;
 
-  // First replay recent global placements
+  // First replay recent global placements & admin actions
   fetchGlobalRelayHistory(callbacks);
 
   const connect = () => {
@@ -220,7 +278,6 @@ export function startGlobalRelayPresence(
 ): () => void {
   const activeMap = new Map<string, OnlinePlayerPresence>();
   let ws: WebSocket | null = null;
-  let closed = false;
 
   const upsertAndEmit = (entry: OnlinePlayerPresence) => {
     activeMap.set(entry.userId, entry);
@@ -330,7 +387,6 @@ export function startGlobalRelayPresence(
   }, 22_000);
 
   return () => {
-    closed = true;
     window.clearInterval(interval);
     sendHeartbeat('leave');
     try {

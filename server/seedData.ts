@@ -699,6 +699,31 @@ export const INITIAL_TASKS: TaskDef[] = [
 export function createInitialDatabaseSeed() {
   const now = Date.now();
   const users: Record<string, any> = {
+    zero_sus: {
+      id: 'zero_sus',
+      username: 'zero_sus',
+      displayName: 'ZERO_SUS · Lead Developer & Admin',
+      avatarEmoji: '👑',
+      avatarColor: '#6B3DFF',
+      bio: 'Creator & Lead Developer of Dotwall 1000×1000. Full Admin & God-Mode Control.',
+      pixelsPlaced: 500,
+      tasksCompleted: 10,
+      points: 9999,
+      lastPixelAt: 0,
+      nextCooldownAt: 0,
+      lastCommentAt: 0,
+      joinedAt: now - 86400000 * 30,
+      achievements: [
+        'first_dot',
+        'pixel_modifier',
+        'pixel_ten',
+        'pixel_fifty',
+        'task_rookie',
+        'daily_five_sweep',
+        'community_voice',
+      ],
+      isAdmin: true,
+    },
     'usr-nyx': {
       id: 'usr-nyx',
       username: 'nyx_pixel',
