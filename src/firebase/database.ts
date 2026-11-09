@@ -162,6 +162,13 @@ export async function placePixelInFirebase(params: {
     updatedAt: serverTimestamp(),
   };
 
+  if (user.country) {
+    pixelPayload.ownerCountry = user.country.slice(0, 64);
+  }
+  if (user.avatarUrl) {
+    pixelPayload.ownerAvatarUrl = user.avatarUrl.slice(0, 250000);
+  }
+
   if (existingPixel) {
     pixelPayload.prevColor = existingPixel.color;
     pixelPayload.prevOwnerId = existingPixel.ownerId;
@@ -183,6 +190,13 @@ export async function placePixelInFirebase(params: {
     undone: false,
     createdAt: serverTimestamp(),
   };
+
+  if (user.country) {
+    historyPayload.country = user.country.slice(0, 64);
+  }
+  if (user.avatarUrl) {
+    historyPayload.avatarUrl = user.avatarUrl.slice(0, 250000);
+  }
 
   const multiPathUpdates: Record<string, any> = {
     [`canvasChunks/${chunkId}/${pixelKey}`]: pixelPayload,
@@ -234,6 +248,8 @@ export async function placePixelInFirebase(params: {
     color: cleanColor,
     ownerId: user.id,
     ownerUsername: user.username,
+    ownerCountry: user.country || undefined,
+    ownerAvatarUrl: user.avatarUrl || undefined,
     version: nextVersion,
     updatedAt: serverNow,
   };
@@ -252,6 +268,8 @@ export async function placePixelInFirebase(params: {
     pixelVersion: nextVersion,
     undone: false,
     createdAt: serverNow,
+    country: user.country || undefined,
+    avatarUrl: user.avatarUrl || undefined,
   };
 
   return {
@@ -480,6 +498,8 @@ export async function updateProfileInFirebase(
     bio: string;
     avatarEmoji: string;
     avatarColor: string;
+    avatarUrl?: string;
+    country?: string;
   }
 ): Promise<{ ok: boolean; error?: string; user?: PlayerProfile }> {
   const isAdmin = isDeveloperAdmin(user);
@@ -501,6 +521,15 @@ export async function updateProfileInFirebase(
   try {
     const snap = await get(userRef);
     const existing = snap.exists() ? snap.val() : user;
+    const resolvedAvatarUrl =
+      payload.avatarUrl !== undefined
+        ? (payload.avatarUrl.trim() || undefined)
+        : (existing.avatarUrl || user.avatarUrl);
+    const resolvedCountry =
+      payload.country !== undefined
+        ? (payload.country.trim() || undefined)
+        : (existing.country || user.country);
+
     const updatedProfile: PlayerProfile = {
       id: user.id,
       username: isAdmin ? 'zero_sus' : cleanUsername,
@@ -508,6 +537,8 @@ export async function updateProfileInFirebase(
       bio: payload.bio.replace(/[<>]/g, '').trim().slice(0, 160),
       avatarEmoji: payload.avatarEmoji.slice(0, 8) || '👾',
       avatarColor: /^#[0-9A-Fa-f]{6}$/.test(payload.avatarColor) ? payload.avatarColor : '#6B3DFF',
+      avatarUrl: resolvedAvatarUrl,
+      country: resolvedCountry,
       pixelsPlaced: Number(existing.pixelsPlaced ?? user.pixelsPlaced ?? 0),
       tasksCompleted: Number(existing.tasksCompleted ?? user.tasksCompleted ?? 0),
       points: Number(existing.points ?? user.points ?? 50),
@@ -522,6 +553,8 @@ export async function updateProfileInFirebase(
 
     const dbPayload: Record<string, any> = {
       ...updatedProfile,
+      avatarUrl: resolvedAvatarUrl || null,
+      country: resolvedCountry || null,
       updatedAt: serverTimestamp(),
     };
     await set(userRef, dbPayload);

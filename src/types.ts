@@ -37,6 +37,10 @@ export interface GlobalPixel {
   ownerUsername: string;
   version: number;
   updatedAt: number;
+  ownerCountry?: string;
+  ownerAvatarUrl?: string;
+  prevColor?: string | null;
+  prevOwnerUsername?: string | null;
 }
 
 export interface PixelHistoryEntry {
@@ -53,6 +57,8 @@ export interface PixelHistoryEntry {
   pixelVersion: number;
   undone: boolean;
   createdAt: number;
+  country?: string;
+  avatarUrl?: string;
 }
 
 export interface PlayerProfile {
@@ -61,6 +67,8 @@ export interface PlayerProfile {
   displayName: string;
   avatarEmoji: string;
   avatarColor: string;
+  avatarUrl?: string;
+  country?: string;
   bio: string;
   pixelsPlaced: number;
   tasksCompleted: number;
@@ -112,6 +120,8 @@ export interface OnlinePlayerPresence {
   username: string;
   avatarEmoji: string;
   avatarColor: string;
+  avatarUrl?: string;
+  country?: string;
   activeView: string;
   lastSeenAt: number;
 }

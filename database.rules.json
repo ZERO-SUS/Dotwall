@@ -40,6 +40,8 @@
         "nextCooldownAt": { ".validate": "newData.isNumber()" },
         "achievements": { ".validate": true },
         "isAdmin": { ".validate": "!newData.exists() || newData.isBoolean()" },
+        "avatarUrl": { ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 250000)" },
+        "country": { ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 64)" },
         "updatedAt": { ".validate": "newData.isNumber()" },
         "$other": { ".validate": false }
       }
@@ -88,6 +90,8 @@
           "prevColor": { ".validate": "newData.isString() && newData.val().matches(/^#[0-9A-F]{6}$/)" },
           "prevOwnerId": { ".validate": "newData.isString()" },
           "prevOwnerUsername": { ".validate": "newData.isString()" },
+          "ownerCountry": { ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 64)" },
+          "ownerAvatarUrl": { ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 250000)" },
           "$other": { ".validate": false }
         }
       }

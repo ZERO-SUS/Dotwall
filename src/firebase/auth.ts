@@ -116,6 +116,8 @@ export async function ensurePlayerProfileInDb(
         : data.displayName || safeUsername,
       avatarEmoji: isAdminUser ? data.avatarEmoji || '👑' : data.avatarEmoji || '👾',
       avatarColor: data.avatarColor || '#6B3DFF',
+      avatarUrl: data.avatarUrl || fbUser.photoURL || undefined,
+      country: data.country || undefined,
       bio: isAdminUser
         ? data.bio || 'Creator & Lead Developer of Dotwall 1000×1000.'
         : data.bio || 'Collaborating on the 1,000,000-pixel global wall.',
@@ -152,6 +154,8 @@ export async function ensurePlayerProfileInDb(
     avatarColor: isAdminUser
       ? '#6B3DFF'
       : overrides?.avatarColor || AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)],
+    avatarUrl: fbUser.photoURL || undefined,
+    country: 'India',
     bio: isAdminUser
       ? 'Creator & Lead Developer of Dotwall 1000×1000.'
       : 'Collaborating on the 1,000,000-pixel global Dotwall.',
@@ -182,6 +186,12 @@ export async function ensurePlayerProfileInDb(
       achievements: [],
       updatedAt: serverTimestamp(),
     };
+    if (newProfile.avatarUrl) {
+      dbPayload.avatarUrl = newProfile.avatarUrl;
+    }
+    if (newProfile.country) {
+      dbPayload.country = newProfile.country;
+    }
     if (isAdminUser) {
       dbPayload.isAdmin = true;
     }

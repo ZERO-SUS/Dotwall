@@ -93,6 +93,7 @@ import { AdminPanelView } from './components/AdminPanelView';
 import { GlobalInsightsAndGuide } from './components/GlobalInsightsAndGuide';
 import { PixelArtworkPreview } from './components/PixelArtworkPreview';
 import { AuthModal } from './components/AuthModal';
+import { UserAvatar } from './components/UserAvatar';
 import {
   applyAppearanceToDocument,
   AppearanceSettings,
@@ -1494,6 +1495,8 @@ export function App() {
       bio: string;
       avatarEmoji: string;
       avatarColor: string;
+      avatarUrl?: string;
+      country?: string;
     }) => {
       if (!currentUser) return { ok: false, error: 'Not signed in.' };
       if (!isDeveloperAdmin(currentUser) && isReservedAdminHandle(payload.username)) {
@@ -1508,6 +1511,11 @@ export function App() {
           const fbRes = await updateProfileInFirebase(currentUser, payload);
           if (!fbRes.ok && fbRes.error) {
             return { ok: false, error: fbRes.error };
+          }
+          if (fbRes.ok && fbRes.user) {
+            setCurrentUser(fbRes.user);
+            setUsers((prev) => prev.map((u) => (u.id === fbRes.user!.id ? fbRes.user! : u)));
+            return { ok: true };
           }
         } catch {
           // fallback
@@ -2195,14 +2203,7 @@ export function App() {
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                          <span
-                            className="sq"
-                            style={{
-                              backgroundColor: p.avatarColor || '#6B3DFF',
-                              borderRadius: '50%',
-                              flexShrink: 0,
-                            }}
-                          />
+                          <UserAvatar user={p} size={20} />
                           <button
                             type="button"
                             className="inline-user-link"
@@ -2212,7 +2213,7 @@ export function App() {
                               handleInspectPlayer(p.username);
                             }}
                           >
-                            {p.avatarEmoji || '👾'} @{p.username}
+                            @{p.username}
                           </button>
                           {isSelf && (
                             <span
@@ -2361,12 +2362,7 @@ export function App() {
           >
             {currentUser ? (
               <>
-                <span
-                  className="creator-avatar-dot"
-                  style={{ backgroundColor: currentUser.avatarColor }}
-                >
-                  {currentUser.avatarEmoji}
-                </span>
+                <UserAvatar user={currentUser} size={20} />
                 <span className="user-nav-name">@{currentUser.username}</span>
               </>
             ) : (
@@ -2601,6 +2597,7 @@ export function App() {
               pixelsMap={pixelsMap}
               history={history}
               stats={stats}
+              users={users}
               currentUser={currentUser}
               cooldownRemainingMs={cooldownRemainingMs}
               nextCooldownAt={nextCooldownAt}
@@ -2655,6 +2652,7 @@ export function App() {
             pixelsMap={pixelsMap}
             history={history}
             stats={stats}
+            users={users}
             currentUser={currentUser}
             cooldownRemainingMs={cooldownRemainingMs}
             nextCooldownAt={nextCooldownAt}

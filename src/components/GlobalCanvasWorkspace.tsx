@@ -20,6 +20,7 @@ import {
   Undo2,
   ZoomIn,
   ZoomOut,
+  Info,
 } from 'lucide-react';
 import {
   CanvasTool,
@@ -32,11 +33,14 @@ import {
 import { CANVAS_SIZE, COOLDOWN_SECONDS, DOTWALL_PALETTE, getColorName } from '../constants';
 import { exportGlobalCanvasPng } from '../utils/exportPng';
 import { getVisibleChunkIds } from '../firebase/database';
+import { UserAvatar } from './UserAvatar';
+import { PixelInfoModal } from './PixelInfoModal';
 
 interface GlobalCanvasWorkspaceProps {
   pixelsMap: Map<string, GlobalPixel>;
   history: PixelHistoryEntry[];
   stats: GlobalStats;
+  users?: PlayerProfile[];
   currentUser: PlayerProfile | null;
   cooldownRemainingMs: number;
   nextCooldownAt: number;
@@ -59,6 +63,7 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   pixelsMap,
   history,
   stats,
+  users = [],
   currentUser,
   cooldownRemainingMs,
   nextCooldownAt,
@@ -77,6 +82,9 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
   const [adminBrushSize, setAdminBrushSize] = useState<1 | 3 | 5 | 10>(1);
   const [selectedCoord, setSelectedCoord] = useState<{ x: number; y: number }>({ x: 490, y: 490 });
   const [hoverCoord, setHoverCoord] = useState<{ x: number; y: number } | null>(null);
+
+  const [showPixelInfoModal, setShowPixelInfoModal] = useState<boolean>(false);
+  const [justPlacedAt, setJustPlacedAt] = useState<{ x: number; y: number } | null>(null);
 
   const [tool, setTool] = useState<CanvasTool>('place');
   const [selectedColor, setSelectedColor] = useState<string>('#6B3DFF');
@@ -494,6 +502,10 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
 
       if (res.ok) {
         selectColorWithHistory(selectedColor);
+        setJustPlacedAt({ x: targetX, y: targetY });
+        setTimeout(() => {
+          setJustPlacedAt((curr) => (curr?.x === targetX && curr?.y === targetY ? null : curr));
+        }, 7000);
         setStatusMsg({
           text: existing
             ? `Replaced (${targetX}, ${targetY}) with ${getColorName(selectedColor)} (${selectedColor})! (0 new slots used)`
@@ -790,6 +802,43 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     [pixelsMap, hoverCoord]
   );
 
+  const inspectedPixelOwnerProfile = useMemo(() => {
+    if (!inspectedPixel || !users) return null;
+    const cleanId = (inspectedPixel.ownerId || '').toLowerCase();
+    const cleanName = (inspectedPixel.ownerUsername || '').toLowerCase();
+    return (
+      users.find(
+        (u) =>
+          (u.id && u.id.toLowerCase() === cleanId) ||
+          (u.username && u.username.toLowerCase() === cleanName)
+      ) || null
+    );
+  }, [inspectedPixel, users]);
+
+  // Floating Arrow Indicator Tag position above the selected/placed pixel cell
+  const floatingTagPos = useMemo(() => {
+    const canvas = mainCanvasRef.current;
+    if (!canvas) return null;
+    const originX = canvas.width / 2 - camera.x * zoom;
+    const originY = canvas.height / 2 - camera.y * zoom;
+
+    const cellX = originX + selectedCoord.x * zoom;
+    const cellY = originY + selectedCoord.y * zoom;
+
+    // Check if within visible bounds with margin
+    if (cellX + zoom < -60 || cellX > canvas.width + 60 || cellY + zoom < -60 || cellY > canvas.height + 60) {
+      return null;
+    }
+
+    const scaleX = canvas.width / (canvas.clientWidth || canvas.width);
+    const scaleY = canvas.height / (canvas.clientHeight || canvas.height);
+
+    return {
+      x: (cellX + zoom / 2) / scaleX,
+      y: cellY / scaleY,
+    };
+  }, [camera.x, camera.y, zoom, selectedCoord.x, selectedCoord.y]);
+
   const circumference = 2 * Math.PI * 30;
   const cooldownFraction = Math.min(1, Math.max(0, cooldownRemainingMs / (COOLDOWN_SECONDS * 1000)));
   const strokeDashoffset = circumference * cooldownFraction;
@@ -1061,6 +1110,61 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                 if (tool === 'place') handleCommitPlace();
               }}
             />
+
+            {/* Floating Arrow Indicator Tag above placed / selected pixel */}
+            {floatingTagPos && (
+              <div
+                className="pixel-arrow-indicator-tag"
+                style={{
+                  position: 'absolute',
+                  left: `${floatingTagPos.x}px`,
+                  top: `${floatingTagPos.y}px`,
+                  transform: 'translate(-50%, calc(-100% - 10px))',
+                  zIndex: 35,
+                  pointerEvents: 'auto',
+                }}
+              >
+                <UserAvatar
+                  user={{
+                    username:
+                      inspectedPixel?.ownerUsername ||
+                      (justPlacedAt?.x === selectedCoord.x && justPlacedAt?.y === selectedCoord.y
+                        ? currentUser?.username
+                        : 'Unclaimed'),
+                    avatarEmoji:
+                      inspectedPixelOwnerProfile?.avatarEmoji || (inspectedPixel ? '🎨' : '✨'),
+                    avatarColor:
+                      inspectedPixelOwnerProfile?.avatarColor || inspectedPixel?.color || '#6B3DFF',
+                    avatarUrl:
+                      inspectedPixelOwnerProfile?.avatarUrl ||
+                      inspectedPixel?.ownerAvatarUrl ||
+                      (justPlacedAt?.x === selectedCoord.x && justPlacedAt?.y === selectedCoord.y
+                        ? currentUser?.avatarUrl
+                        : null),
+                  }}
+                  size={24}
+                />
+                <span style={{ fontWeight: 700, fontSize: 12 }}>
+                  {inspectedPixel
+                    ? `@${inspectedPixel.ownerUsername}`
+                    : justPlacedAt?.x === selectedCoord.x && justPlacedAt?.y === selectedCoord.y
+                    ? `@${currentUser?.username} (Just placed!)`
+                    : `(${selectedCoord.x}, ${selectedCoord.y})`}
+                </span>
+
+                <button
+                  type="button"
+                  className="pixel-tag-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowPixelInfoModal(true);
+                  }}
+                  title="View detailed pixel information (Date, Time, Country, DP)"
+                >
+                  <Info size={11} /> Info
+                </button>
+              </div>
+            )}
 
             {/* Floating Minimap HUD */}
             <div className="minimap-hud">
@@ -1399,6 +1503,14 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
                 <div className="insp-actions" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <button
                     type="button"
+                    className="btn primary"
+                    style={{ width: '100%', justifyContent: 'center' }}
+                    onClick={() => setShowPixelInfoModal(true)}
+                  >
+                    <Info size={13} /> View Full Pixel Info (Date, Time, Country, DP)
+                  </button>
+                  <button
+                    type="button"
                     className="insp-use"
                     onClick={() => selectColorWithHistory(inspectedPixel.color)}
                   >
@@ -1488,6 +1600,19 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
             </ul>
           </div>
         </aside>
+      )}
+
+      {showPixelInfoModal && (
+        <PixelInfoModal
+          coord={selectedCoord}
+          pixel={inspectedPixel}
+          ownerProfile={inspectedPixelOwnerProfile}
+          currentUser={currentUser}
+          onClose={() => setShowPixelInfoModal(false)}
+          onInspectPlayer={onInspectPlayer}
+          onPlaceAtCoord={(x, y) => handleCommitPlace(x, y)}
+          onUndoPixel={onUndoPixel ? handleUndo : undefined}
+        />
       )}
     </div>
   );
