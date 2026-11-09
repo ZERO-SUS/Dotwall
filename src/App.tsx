@@ -10,7 +10,6 @@ import {
   Paintbrush,
   Palette,
   Search,
-  Server,
   ShieldCheck,
   Shuffle,
   Sparkles,
@@ -87,7 +86,19 @@ import {
 } from './components/ThemeCustomizerModal';
 
 const USER_ID_STORAGE_KEY = 'dotwall_auth_user_id';
-const STATIC_DB_STORAGE_KEY = 'dotwall_static_global_db_v2';
+const STATIC_DB_STORAGE_KEY = 'dotwall_clean_global_db_v4';
+const BANNED_BOT_IDS = new Set([
+  'usr-nyx',
+  'usr-kairo',
+  'usr-zoya',
+  'usr-milo',
+  'usr-sora',
+  'nyx_pixel',
+  'kairo_99',
+  'zoya.exe',
+  'milo_bit',
+  'sora_vibe',
+]);
 const SESSION_ID = `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
 function isLocalhostRuntime(): boolean {
@@ -169,7 +180,7 @@ export function App() {
     {
       id: 'notif-welcome',
       title: 'Welcome to Dotwall 1000×1000!',
-      body: 'Connected to Firebase (dotwall-13046). Place or modify pixels on the 1M grid and complete your 5 daily objects!',
+      body: 'Place or modify pixels on the 1,000,000-pixel global wall and complete your 5 daily objects!',
       icon: '👾',
       timestamp: Date.now(),
       read: false,
@@ -289,10 +300,13 @@ export function App() {
     []
   );
 
-  // Initialize Local/Static State Seed
+  // Initialize Local/Static State Seed (Clean 1000x1000 Canvas — Zero Bots)
   const loadOrInitStaticEngine = useCallback(() => {
     let parsed: any = null;
     try {
+      window.localStorage.removeItem('dotwall_static_global_db_v1');
+      window.localStorage.removeItem('dotwall_static_global_db_v2');
+      window.localStorage.removeItem('dotwall_clean_global_db_v3');
       const raw = window.localStorage.getItem(STATIC_DB_STORAGE_KEY);
       if (raw) parsed = JSON.parse(raw);
     } catch {
@@ -301,10 +315,19 @@ export function App() {
     const seed = parsed && parsed.pixels && parsed.users ? parsed : createInitialDatabaseSeed();
     const map = new Map<string, GlobalPixel>();
     Object.values(seed.pixels as Record<string, GlobalPixel>).forEach((px) => {
-      map.set(`${px.x},${px.y}`, px);
+      if (
+        !BANNED_BOT_IDS.has((px.ownerId || '').toLowerCase()) &&
+        !BANNED_BOT_IDS.has((px.ownerUsername || '').toLowerCase())
+      ) {
+        map.set(`${px.x},${px.y}`, px);
+      }
     });
 
-    const usersList = Object.values(seed.users) as PlayerProfile[];
+    const usersList = (Object.values(seed.users) as PlayerProfile[]).filter(
+      (u) =>
+        !BANNED_BOT_IDS.has((u.id || '').toLowerCase()) &&
+        !BANNED_BOT_IDS.has((u.username || '').toLowerCase())
+    );
     if (!usersList.some((u) => u.id === 'zero_sus' || u.username === 'zero_sus')) {
       const adminSeed: PlayerProfile = {
         id: 'zero_sus',
@@ -312,14 +335,14 @@ export function App() {
         displayName: 'ZERO_SUS · Lead Developer & Admin',
         avatarEmoji: '👑',
         avatarColor: '#6B3DFF',
-        bio: 'Creator & Lead Developer of Dotwall 1000×1000. Full Admin & God-Mode Control.',
-        pixelsPlaced: 500,
-        tasksCompleted: 10,
+        bio: 'Creator & Lead Developer of Dotwall 1000×1000.',
+        pixelsPlaced: 0,
+        tasksCompleted: 0,
         points: 9999,
         lastPixelAt: 0,
         nextCooldownAt: 0,
-        joinedAt: Date.now() - 86400000 * 30,
-        achievements: ACHIEVEMENTS_CATALOG.map((a) => a.id),
+        joinedAt: Date.now(),
+        achievements: [],
         isAdmin: true,
       };
       usersList.unshift(adminSeed);
@@ -2118,10 +2141,10 @@ export function App() {
                     className="mini-link-btn"
                     onClick={() => {
                       setShowPresenceDropdown(false);
-                      setShowBackendModal(true);
+                      setActiveTab('admin');
                     }}
                   >
-                    <Server size={11} /> Firebase / API
+                    <ShieldCheck size={11} /> 👑 Admin Panel
                   </button>
                 </div>
                 <ul className="feed">
@@ -2226,6 +2249,21 @@ export function App() {
             aria-label="Customize appearance"
           >
             <Paintbrush size={15} />
+          </button>
+
+          {/* Developer Admin Panel Quick Pill */}
+          <button
+            type="button"
+            className="user-nav-pill"
+            style={{
+              borderColor: activeTab === 'admin' ? 'var(--accent)' : undefined,
+              background: activeTab === 'admin' ? 'var(--accent-soft)' : undefined,
+            }}
+            onClick={() => setActiveTab('admin')}
+            title="Open Developer & Admin Panel (@zero_sus)"
+          >
+            <ShieldCheck size={14} />
+            <span className="user-nav-name">👑 Admin</span>
           </button>
 
           {/* Login / Account Pill */}
@@ -2778,7 +2816,7 @@ export function App() {
       {/* FOOTER */}
       <footer className="foot">
         <span>
-          dotwall · 1000 × 1000 (1,000,000 pixels) · Firebase (`dotwall-13046`) · 5 Daily Objects ·{' '}
+          dotwall · 1000 × 1000 (1,000,000 pixels) · Global Real-Time Multiplayer · 5 Daily Objects ·{' '}
           {stats.pixelsUsed.toLocaleString()} pixels placed
         </span>
         <span style={{ display: 'flex', gap: 10 }}>
@@ -2795,13 +2833,6 @@ export function App() {
             onClick={() => setShowThemeModal(true)}
           >
             🎨 Custom Theme Studio
-          </button>
-          <button
-            type="button"
-            className="mini-link-btn"
-            onClick={() => setShowBackendModal(true)}
-          >
-            🔥 Firebase (`dotwall-13046`) Connected
           </button>
         </span>
       </footer>

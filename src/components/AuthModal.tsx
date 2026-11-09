@@ -33,7 +33,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onGoogleLogin,
   onPasswordReset,
   onLogout,
-  onOpenCloudConfig,
+  onOpenCloudConfig: _onOpenCloudConfig,
   onOpenAdminPanel,
 }) => {
   const [tab, setTab] = useState<'login' | 'signup' | 'admin' | 'reset'>('login');
@@ -155,7 +155,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         <div className="modal-header">
           <div>
             <span className="genz-pill daily">
-              {tab === 'admin' ? '👑 DEVELOPER GOD-MODE · UID: zero_sus' : 'FIREBASE AUTH · UID SESSION'}
+              {tab === 'admin' ? '👑 DEVELOPER GOD-MODE · UID: zero_sus' : 'DOTWALL ACCOUNT · GLOBAL MULTIPLAYER'}
             </span>
             <h2 className="modal-title">
               {tab === 'login'
@@ -464,17 +464,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         <div style={{ marginTop: 18, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span className="form-label">Firebase Project: dotwall-13046</span>
-            <button
-              type="button"
-              className="mini-link-btn"
-              onClick={() => {
-                onClose();
-                onOpenCloudConfig();
-              }}
-            >
-              🔥 Database &amp; Auth Status
-            </button>
+            <span className="form-label">Dotwall Global 1,000,000-Pixel Wall</span>
+            {onOpenAdminPanel && (
+              <button
+                type="button"
+                className="mini-link-btn"
+                onClick={() => {
+                  onClose();
+                  onOpenAdminPanel();
+                }}
+              >
+                👑 Developer Admin Panel (@zero_sus)
+              </button>
+            )}
           </div>
         </div>
       </div>

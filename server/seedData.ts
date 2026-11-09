@@ -705,228 +705,22 @@ export function createInitialDatabaseSeed() {
       displayName: 'ZERO_SUS · Lead Developer & Admin',
       avatarEmoji: '👑',
       avatarColor: '#6B3DFF',
-      bio: 'Creator & Lead Developer of Dotwall 1000×1000. Full Admin & God-Mode Control.',
-      pixelsPlaced: 500,
-      tasksCompleted: 10,
+      bio: 'Creator & Lead Developer of Dotwall 1000×1000.',
+      pixelsPlaced: 0,
+      tasksCompleted: 0,
       points: 9999,
       lastPixelAt: 0,
       nextCooldownAt: 0,
       lastCommentAt: 0,
-      joinedAt: now - 86400000 * 30,
-      achievements: [
-        'first_dot',
-        'pixel_modifier',
-        'pixel_ten',
-        'pixel_fifty',
-        'task_rookie',
-        'daily_five_sweep',
-        'community_voice',
-      ],
+      joinedAt: now,
+      achievements: [],
       isAdmin: true,
-    },
-    'usr-nyx': {
-      id: 'usr-nyx',
-      username: 'nyx_pixel',
-      displayName: 'Nyx // Pixel Witch',
-      avatarEmoji: '👾',
-      avatarColor: '#6B3DFF',
-      bio: 'Building neon shrines around (500, 500). Gen-Z pixel maximalist.',
-      pixelsPlaced: 142,
-      tasksCompleted: 5,
-      points: 1860,
-      lastPixelAt: now - 180000,
-      nextCooldownAt: 0,
-      lastCommentAt: 0,
-      joinedAt: now - 86400000 * 14,
-      achievements: ['first_dot', 'pixel_modifier', 'pixel_ten', 'pixel_fifty', 'task_rookie', 'daily_five_sweep', 'community_voice'],
-    },
-    'usr-kairo': {
-      id: 'usr-kairo',
-      username: 'kairo_99',
-      displayName: 'Kairo',
-      avatarEmoji: '🚀',
-      avatarColor: '#5CF2B2',
-      bio: 'Sci-fi sprites & orbital ships in Sector (510, 490).',
-      pixelsPlaced: 118,
-      tasksCompleted: 4,
-      points: 1510,
-      lastPixelAt: now - 240000,
-      nextCooldownAt: 0,
-      lastCommentAt: 0,
-      joinedAt: now - 86400000 * 11,
-      achievements: ['first_dot', 'pixel_ten', 'pixel_fifty', 'task_rookie'],
-    },
-    'usr-zoya': {
-      id: 'usr-zoya',
-      username: 'zoya.exe',
-      displayName: 'Zoya',
-      avatarEmoji: '🌸',
-      avatarColor: '#FF84CB',
-      bio: 'Botanical pixel art & pastel gradients.',
-      pixelsPlaced: 96,
-      tasksCompleted: 3,
-      points: 1290,
-      lastPixelAt: now - 420000,
-      nextCooldownAt: 0,
-      lastCommentAt: 0,
-      joinedAt: now - 86400000 * 9,
-      achievements: ['first_dot', 'pixel_ten', 'pixel_fifty', 'task_rookie'],
-    },
-    'usr-milo': {
-      id: 'usr-milo',
-      username: 'milo_bit',
-      displayName: 'Milo 8-Bit',
-      avatarEmoji: '⚡',
-      avatarColor: '#FFD93B',
-      bio: 'Speed-running the 5-task daily gauntlet.',
-      pixelsPlaced: 84,
-      tasksCompleted: 5,
-      points: 1140,
-      lastPixelAt: now - 600000,
-      nextCooldownAt: 0,
-      lastCommentAt: 0,
-      joinedAt: now - 86400000 * 7,
-      achievements: ['first_dot', 'pixel_ten', 'pixel_fifty', 'task_rookie', 'daily_five_sweep'],
-    },
-    'usr-sora': {
-      id: 'usr-sora',
-      username: 'sora_vibe',
-      displayName: 'Sora',
-      avatarEmoji: '🛸',
-      avatarColor: '#6FD6FF',
-      bio: 'Exploring every corner of the 1,000,000-pixel grid.',
-      pixelsPlaced: 64,
-      tasksCompleted: 2,
-      points: 820,
-      lastPixelAt: now - 900000,
-      nextCooldownAt: 0,
-      lastCommentAt: 0,
-      joinedAt: now - 86400000 * 5,
-      achievements: ['first_dot', 'pixel_ten', 'pixel_fifty'],
     },
   };
 
   const pixels: Record<string, SeedPixel> = {};
   const history: any[] = [];
-
-  const placeSeedSprite = (
-    sprite: { x: number; y: number; color: string }[],
-    baseX: number,
-    baseY: number,
-    ownerId: string,
-    ownerUsername: string,
-    timeOffsetMs: number
-  ) => {
-    sprite.forEach((p, idx) => {
-      const x = baseX + p.x;
-      const y = baseY + p.y;
-      const key = `${x},${y}`;
-      const ts = now - timeOffsetMs + idx * 400;
-      pixels[key] = {
-        x,
-        y,
-        color: p.color,
-        ownerId,
-        ownerUsername,
-        version: 1,
-        updatedAt: ts,
-      };
-    });
-  };
-
-  placeSeedSprite(INITIAL_TASKS[7].referencePixels, 482, 482, 'usr-nyx', 'nyx_pixel', 3600000 * 5);
-  placeSeedSprite(INITIAL_TASKS[8].referencePixels, 502, 482, 'usr-kairo', 'kairo_99', 3600000 * 4);
-  placeSeedSprite(INITIAL_TASKS[0].referencePixels, 482, 502, 'usr-zoya', 'zoya.exe', 3600000 * 3);
-  placeSeedSprite(INITIAL_TASKS[1].referencePixels, 502, 502, 'usr-milo', 'milo_bit', 3600000 * 2);
-  placeSeedSprite(INITIAL_TASKS[2].referencePixels, 520, 492, 'usr-sora', 'sora_vibe', 3600000 * 1);
-
-  const recentKeys = Object.keys(pixels).slice(-24);
-  recentKeys.forEach((k, i) => {
-    const px = pixels[k];
-    history.push({
-      id: `hist-seed-${i}`,
-      x: px.x,
-      y: px.y,
-      prevColor: null,
-      prevOwnerId: null,
-      prevOwnerUsername: null,
-      newColor: px.color,
-      userId: px.ownerId,
-      username: px.ownerUsername,
-      actionType: 'place',
-      pixelVersion: 1,
-      undone: false,
-      createdAt: now - (24 - i) * 45000,
-    });
-  });
-
-  const artworks = [
-    {
-      id: 'art-cyber-cat',
-      title: 'Midnight Cyber Cat #01',
-      description: 'Drawn in the Daily 5-Task Gauntlet — neon purple coat with acid-lime eyes.',
-      category: 'Characters',
-      gridSize: 16,
-      pixels: INITIAL_TASKS[7].referencePixels,
-      creatorId: 'usr-nyx',
-      creatorUsername: 'nyx_pixel',
-      creatorAvatar: '👾',
-      creatorColor: '#6B3DFF',
-      taskId: 'task-cat',
-      likes: ['usr-kairo', 'usr-zoya', 'usr-milo', 'usr-sora'],
-      commentsCount: 2,
-      createdAt: now - 3600000 * 18,
-    },
-    {
-      id: 'art-orbital-one',
-      title: 'Starship Nova V',
-      description: '16×16 orbital cruiser ready to liftoff from the central canvas plaza.',
-      category: 'Sci-Fi',
-      gridSize: 16,
-      pixels: INITIAL_TASKS[8].referencePixels,
-      creatorId: 'usr-kairo',
-      creatorUsername: 'kairo_99',
-      creatorAvatar: '🚀',
-      creatorColor: '#5CF2B2',
-      taskId: 'task-rocket',
-      likes: ['usr-nyx', 'usr-zoya', 'usr-milo'],
-      commentsCount: 1,
-      createdAt: now - 3600000 * 12,
-    },
-    {
-      id: 'art-arcade-pad',
-      title: 'Neon Gamepad Pro',
-      description: 'Completed Task 3/5 in today’s object gauntlet!',
-      category: 'Gaming & Tech',
-      gridSize: 16,
-      pixels: INITIAL_TASKS[2].referencePixels,
-      creatorId: 'usr-milo',
-      creatorUsername: 'milo_bit',
-      creatorAvatar: '⚡',
-      creatorColor: '#FFD93B',
-      taskId: 'task-gamepad',
-      likes: ['usr-nyx', 'usr-kairo', 'usr-sora'],
-      commentsCount: 1,
-      createdAt: now - 3600000 * 8,
-    },
-    {
-      id: 'art-boba-tea',
-      title: 'Taro Boba Milk Tea',
-      description: 'Completed Task 5/5 in the daily object challenge.',
-      category: 'Food & Drink',
-      gridSize: 16,
-      pixels: INITIAL_TASKS[4].referencePixels,
-      creatorId: 'usr-zoya',
-      creatorUsername: 'zoya.exe',
-      creatorAvatar: '🌸',
-      creatorColor: '#FF84CB',
-      taskId: 'task-boba',
-      likes: ['usr-nyx', 'usr-sora'],
-      commentsCount: 1,
-      createdAt: now - 3600000 * 5,
-    },
-  ];
-
+  const artworks: any[] = [];
   const comments: {
     id: string;
     artworkId: string | null;
@@ -941,53 +735,7 @@ export function createInitialDatabaseSeed() {
     reportReason: string | null;
     hidden: boolean;
     createdAt: number;
-  }[] = [
-    {
-      id: 'cmt-1',
-      artworkId: 'art-cyber-cat',
-      parentId: null,
-      userId: 'usr-kairo',
-      username: 'kairo_99',
-      avatarEmoji: '🚀',
-      avatarColor: '#5CF2B2',
-      content: 'The acid-lime eyes against the deep violet fur go so hard! 🔥',
-      likes: ['usr-nyx', 'usr-zoya'],
-      reported: false,
-      reportReason: null,
-      hidden: false,
-      createdAt: now - 3600000 * 16,
-    },
-    {
-      id: 'cmt-2',
-      artworkId: 'art-cyber-cat',
-      parentId: 'cmt-1',
-      userId: 'usr-nyx',
-      username: 'nyx_pixel',
-      avatarEmoji: '👾',
-      avatarColor: '#6B3DFF',
-      content: 'Thank you!! Remember: once pixels are placed on the Global Wall they are permanent — come modify colors around (482, 482)!',
-      likes: ['usr-kairo'],
-      reported: false,
-      reportReason: null,
-      hidden: false,
-      createdAt: now - 3600000 * 15,
-    },
-    {
-      id: 'cmt-3',
-      artworkId: 'art-arcade-pad',
-      parentId: null,
-      userId: 'usr-zoya',
-      username: 'zoya.exe',
-      avatarEmoji: '🌸',
-      avatarColor: '#FF84CB',
-      content: 'Just finished 5/5 of today’s random object tasks! The boba tea one was so fun.',
-      likes: ['usr-kairo'],
-      reported: false,
-      reportReason: null,
-      hidden: false,
-      createdAt: now - 3600000 * 4,
-    },
-  ];
+  }[] = [];
 
   return {
     users,

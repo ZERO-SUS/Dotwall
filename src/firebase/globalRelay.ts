@@ -7,8 +7,8 @@ import type {
   PlayerProfile,
 } from '../types';
 
-const CANVAS_TOPIC = 'dotwall_13046_global_canvas_v2';
-const PRESENCE_TOPIC = 'dotwall_13046_global_presence_v2';
+const CANVAS_TOPIC = 'dotwall_global_canvas_clean_v4';
+const PRESENCE_TOPIC = 'dotwall_global_presence_clean_v4';
 const RELAY_HTTP_BASE = 'https://ntfy.sh';
 const RELAY_WS_BASE = 'wss://ntfy.sh';
 
