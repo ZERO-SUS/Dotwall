@@ -50,6 +50,11 @@ import {
   submitTaskInFirebase,
   undoLastPlacementInFirebase,
 } from './firebase/database';
+import {
+  publishGlobalRelayEvent,
+  startGlobalRelayPresence,
+  subscribeToGlobalRelayStream,
+} from './firebase/globalRelay';
 import { initDotwallAnalytics, trackGameEvent } from './firebase/analytics';
 import { onValue, ref } from 'firebase/database';
 import {
@@ -406,8 +411,37 @@ export function App() {
   // Subscribe to Firebase Authentication (dotwall-13046) session persistence
   useEffect(() => {
     const auth = getFirebaseAuth();
+    let autoAuthAttempted = false;
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) return;
+      if (!fbUser) {
+        if (!autoAuthAttempted) {
+          autoAuthAttempted = true;
+          try {
+            const AUTO_CRED_KEY = 'dotwall_auto_fb_cred_v1';
+            let credObj: { email: string; password: string; username: string } | null = null;
+            const raw = window.localStorage.getItem(AUTO_CRED_KEY);
+            if (raw) {
+              credObj = JSON.parse(raw);
+            }
+            if (credObj && credObj.email && credObj.password) {
+              await loginWithEmail(credObj.email, credObj.password).catch(() => {});
+            } else {
+              const randId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+              const autoUsername = `pixel_${Math.floor(1000 + Math.random() * 8999)}`;
+              const newCred = {
+                email: `player_${randId}@dotwall.app`,
+                password: `Dw!${randId}#99`,
+                username: autoUsername,
+              };
+              window.localStorage.setItem(AUTO_CRED_KEY, JSON.stringify(newCred));
+              await registerWithEmail(newCred).catch(() => {});
+            }
+          } catch {
+            // ignore auto-auth failure
+          }
+        }
+        return;
+      }
       try {
         const profile = await ensurePlayerProfileInDb(fbUser);
         window.localStorage.setItem(USER_ID_STORAGE_KEY, profile.id);
@@ -499,7 +533,7 @@ export function App() {
     };
   }, [visibleChunkIds]);
 
-  // Subscribe to Firebase Realtime Presence (`presence/{uid}/connections/{tabId}`)
+  // Subscribe to Firebase Realtime Presence + Global Cross-Device WebSocket Presence
   useEffect(() => {
     if (!currentUser) return;
     const stopPresence = startUserPresenceSession(currentUser, activeTab);
@@ -512,11 +546,85 @@ export function App() {
         }));
       }
     });
+    const stopRelayPresence = startGlobalRelayPresence(
+      currentUser,
+      activeTab,
+      (relayOnlineList) => {
+        if (relayOnlineList.length > 0) {
+          setStats((prev) => {
+            const merged = new Map<string, any>();
+            for (const p of prev.onlinePlayers || []) merged.set(p.userId, p);
+            for (const p of relayOnlineList) merged.set(p.userId, p);
+            const list = Array.from(merged.values());
+            return {
+              ...prev,
+              onlinePlayersCount: Math.max(1, list.length),
+              onlinePlayers: list,
+            };
+          });
+        }
+      }
+    );
     return () => {
       stopPresence();
       stopOnlineListener();
+      stopRelayPresence();
     };
   }, [currentUser?.id, currentUser?.username, activeTab]);
+
+  // Global Real-Time Cloud Relay (Syncs pixels, undos, artworks, and comments across all devices/browsers worldwide in <150ms)
+  useEffect(() => {
+    const unsubRelay = subscribeToGlobalRelayStream({
+      onConnectionState: (connected) => {
+        if (connected) setConnectionState('live');
+      },
+      onPixelPlaced: (pixel, historyEntry) => {
+        setPixelsMap((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(`${pixel.x},${pixel.y}`);
+          if (existing && existing.updatedAt && pixel.updatedAt && existing.updatedAt > pixel.updatedAt) {
+            return prev;
+          }
+          next.set(`${pixel.x},${pixel.y}`, pixel);
+          return next;
+        });
+        if (historyEntry) {
+          setHistory((prev) =>
+            prev.some((h) => h.id === historyEntry.id)
+              ? prev
+              : [...prev.slice(-199), historyEntry]
+          );
+        }
+      },
+      onPixelUndone: (x, y, restoredPixel, historyId) => {
+        setPixelsMap((prev) => {
+          const next = new Map(prev);
+          if (restoredPixel) {
+            next.set(`${x},${y}`, restoredPixel);
+          } else {
+            next.delete(`${x},${y}`);
+          }
+          return next;
+        });
+        if (historyId) {
+          setHistory((prev) =>
+            prev.map((h) => (h.id === historyId ? { ...h, undone: true } : h))
+          );
+        }
+      },
+      onArtworkPublished: (artwork) => {
+        setArtworks((prev) =>
+          prev.some((a) => a.id === artwork.id) ? prev : [artwork, ...prev]
+        );
+      },
+      onCommentPosted: (comment) => {
+        setComments((prev) =>
+          prev.some((c) => c.id === comment.id) ? prev : [...prev, comment]
+        );
+      },
+    });
+    return () => unsubRelay();
+  }, []);
 
   // Multi-tab BroadcastChannel sync for instant cross-tab updates
   useEffect(() => {
@@ -707,6 +815,11 @@ export function App() {
             setHistory((prev) => [...prev.slice(-199), fbRes.historyEntry!]);
             setCurrentUser(nextUser);
             setUsers((prev) => prev.map((u) => (u.id === nextUser.id ? nextUser : u)));
+            publishGlobalRelayEvent({
+              type: 'pixel_placed',
+              pixel: fbRes.pixel!,
+              historyEntry: fbRes.historyEntry!,
+            });
             trackGameEvent('pixel_placed', {
               x,
               y,
@@ -740,6 +853,13 @@ export function App() {
           if (!data.ok) return { ok: false, error: data.error };
           if (data.user) setCurrentUser(data.user);
           if (data.stats) setStats(data.stats);
+          if (data.pixel && data.historyEntry) {
+            publishGlobalRelayEvent({
+              type: 'pixel_placed',
+              pixel: data.pixel,
+              historyEntry: data.historyEntry,
+            });
+          }
           trackGameEvent('pixel_placed', { x, y });
           return { ok: true };
         } catch {
@@ -813,6 +933,12 @@ export function App() {
       setUsers((prev) => prev.map((u) => (u.id === nextUser.id ? nextUser : u)));
 
       broadcastChannelRef.current?.postMessage({
+        type: 'pixel_placed',
+        pixel: updatedPixel,
+        historyEntry: histEntry,
+      });
+
+      publishGlobalRelayEvent({
         type: 'pixel_placed',
         pixel: updatedPixel,
         historyEntry: histEntry,
@@ -927,6 +1053,14 @@ export function App() {
       x: entry.x,
       y: entry.y,
       restoredPixel,
+    });
+
+    publishGlobalRelayEvent({
+      type: 'pixel_undone',
+      x: entry.x,
+      y: entry.y,
+      restoredPixel,
+      historyId: entry.id,
     });
 
     return { ok: true, x: entry.x, y: entry.y };
@@ -1050,6 +1184,10 @@ export function App() {
           createdAt: now,
         };
         setArtworks((prev) => [newArt, ...prev]);
+        publishGlobalRelayEvent({
+          type: 'artwork_published',
+          artwork: newArt,
+        });
       }
 
       const nextUser: PlayerProfile = {
@@ -1147,6 +1285,10 @@ export function App() {
         createdAt: Date.now(),
       };
       setComments((prev) => [...prev, newCmt]);
+      publishGlobalRelayEvent({
+        type: 'comment_posted',
+        comment: newCmt,
+      });
       return { ok: true };
     },
     [currentUser, connectionMode]
