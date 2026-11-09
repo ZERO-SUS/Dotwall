@@ -16,6 +16,8 @@ const TAB_SESSION_ID = `tab_${Date.now().toString(36)}_${Math.random().toString(
  * Registers UID-based presence in Firebase Realtime Database.
  * Prevents duplicate player counts across multiple tabs by storing tab connections
  * under `presence/{uid}/connections/{tabId}` and aggregating by unique `uid`.
+ * Uses `serverTimestamp()` and stores profile fields inside each connection node
+ * so `onDisconnect(tabConnRef).remove()` leaves zero orphaned nodes when all tabs close.
  */
 export function startUserPresenceSession(
   user: PlayerProfile,
@@ -24,42 +26,32 @@ export function startUserPresenceSession(
 ): () => void {
   const db = getFirebaseDb();
   const connectedRef = ref(db, '.info/connected');
-  const userPresenceRef = ref(db, `presence/${user.id}`);
   const tabConnRef = ref(db, `presence/${user.id}/connections/${TAB_SESSION_ID}`);
+
+  const writeConnectionNode = () => {
+    set(tabConnRef, {
+      userId: user.id,
+      username: user.username.slice(0, 24),
+      avatarEmoji: user.avatarEmoji,
+      avatarColor: user.avatarColor,
+      activeView: activeView.slice(0, 20),
+      lastSeenAt: serverTimestamp(),
+    }).catch(() => {});
+  };
 
   const unsubConnected = onValue(connectedRef, (snap) => {
     const isConnected = Boolean(snap.val());
     onConnectionStateChange?.(isConnected);
     if (!isConnected) return;
 
-    // When this tab disconnects, remove ONLY this tab's connection node
+    // When this tab disconnects, remove ONLY this tab's connection node.
+    // When the user's last tab closes, Firebase RTDB automatically deletes `presence/{uid}`.
     onDisconnect(tabConnRef).remove().catch(() => {});
-
-    // Write user metadata + this tab's active connection
-    set(tabConnRef, {
-      activeView,
-      lastSeenAt: Date.now(),
-      serverTime: serverTimestamp(),
-    }).catch(() => {});
-
-    set(ref(db, `presence/${user.id}/profile`), {
-      userId: user.id,
-      username: user.username,
-      avatarEmoji: user.avatarEmoji,
-      avatarColor: user.avatarColor,
-      activeView,
-      lastSeenAt: Date.now(),
-    }).catch(() => {});
+    writeConnectionNode();
   });
 
   // Periodic heartbeat every 20s while tab is open
-  const heartbeatInterval = setInterval(() => {
-    set(tabConnRef, {
-      activeView,
-      lastSeenAt: Date.now(),
-      serverTime: serverTimestamp(),
-    }).catch(() => {});
-  }, 20_000);
+  const heartbeatInterval = setInterval(writeConnectionNode, 20_000);
 
   return () => {
     clearInterval(heartbeatInterval);
@@ -70,7 +62,7 @@ export function startUserPresenceSession(
 
 /**
  * Subscribes to global `presence/` and counts ONLY authenticated users with at least
- * one active non-expired tab connection.
+ * one active non-expired tab connection (deduplicated by `uid`).
  */
 export function subscribeToOnlinePlayers(
   callback: (players: OnlinePlayerPresence[]) => void
@@ -91,15 +83,15 @@ export function subscribeToOnlinePlayers(
     for (const [uid, record] of Object.entries<any>(val)) {
       if (!record || !record.connections) continue;
       const conns = Object.values<any>(record.connections);
-      // Check if at least one tab connection was updated within the last 60 seconds
+      // Pick the freshest tab connection updated within the last 65 seconds
       const freshConn = conns.find((c) => now - Number(c?.lastSeenAt || 0) < 65_000);
-      if (freshConn && record.profile) {
+      if (freshConn) {
         activeUsers.push({
           userId: uid,
-          username: record.profile.username || 'player',
-          avatarEmoji: record.profile.avatarEmoji || '👾',
-          avatarColor: record.profile.avatarColor || '#6B3DFF',
-          activeView: freshConn.activeView || record.profile.activeView || 'home',
+          username: freshConn.username || record.profile?.username || 'player',
+          avatarEmoji: freshConn.avatarEmoji || record.profile?.avatarEmoji || '👾',
+          avatarColor: freshConn.avatarColor || record.profile?.avatarColor || '#6B3DFF',
+          activeView: freshConn.activeView || 'home',
           lastSeenAt: Number(freshConn.lastSeenAt || now),
         });
       }

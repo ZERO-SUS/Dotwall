@@ -755,7 +755,67 @@ export function dotwallMultiplayerPlugin(): Plugin {
             });
           }
 
-          const accuracyScore = Math.min(100, Math.max(40, Number(body.accuracyScore) || 85));
+          // Server-side reference accuracy calculation (do not trust client accuracyScore)
+          const refMap = new Map<string, string>();
+          for (const rp of task.referencePixels || []) {
+            refMap.set(`${rp.x},${rp.y}`, String(rp.color).toUpperCase());
+          }
+          let matchedPos = 0;
+          let matchedColor = 0;
+          const sanitizedPixels: { x: number; y: number; color: string }[] = [];
+          const seenCoords = new Set<string>();
+          for (const p of pixels.slice(0, 256)) {
+            const px = Number(p?.x);
+            const py = Number(p?.y);
+            const pColor = String(p?.color || '').toUpperCase();
+            if (
+              Number.isInteger(px) &&
+              Number.isInteger(py) &&
+              px >= 0 &&
+              px < task.gridSize &&
+              py >= 0 &&
+              py < task.gridSize &&
+              /^#[0-9A-F]{6}$/.test(pColor) &&
+              !seenCoords.has(`${px},${py}`)
+            ) {
+              seenCoords.add(`${px},${py}`);
+              sanitizedPixels.push({ x: px, y: py, color: pColor });
+              const refC = refMap.get(`${px},${py}`);
+              if (refC) {
+                matchedPos++;
+                if (refC === pColor) matchedColor++;
+              }
+            }
+          }
+
+          if (sanitizedPixels.length < 4) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'At least 4 valid in-bounds pixels are required.',
+            });
+          }
+
+          const refCount = Math.max(1, refMap.size);
+          const computedAccuracy = Math.min(
+            100,
+            Math.round((matchedPos / refCount) * 60 + (matchedColor / refCount) * 40)
+          );
+          if (computedAccuracy < 50) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: `Task accuracy too low (${computedAccuracy}% match). Draw the reference object more closely (at least 50% match required) to claim rewards!`,
+            });
+          }
+          const accuracyScore = computedAccuracy;
+
+          // Server-side count of distinct tasks completed today by this user (do not trust client dailyStageIndex)
+          const completedTodayCount =
+            (db.taskSubmissions as any[]).filter(
+              (s: any) =>
+                s.userId === user.id &&
+                new Date(s.createdAt).toISOString().slice(0, 10) === todayUtc
+            ).length + 1;
+
           const pointsAwarded = task.rewardPoints;
 
           const submission = {
@@ -764,7 +824,7 @@ export function dotwallMultiplayerPlugin(): Plugin {
             userId: user.id,
             username: user.username,
             gridSize: task.gridSize,
-            pixels,
+            pixels: sanitizedPixels,
             accuracyScore,
             pointsAwarded,
             createdAt: now,
@@ -779,7 +839,7 @@ export function dotwallMultiplayerPlugin(): Plugin {
               description: sanitizeText(body.description || `Completed the "${task.title}" challenge (${accuracyScore}% match).`, 280),
               category: task.category,
               gridSize: task.gridSize,
-              pixels,
+              pixels: sanitizedPixels,
               creatorId: user.id,
               creatorUsername: user.username,
               creatorAvatar: user.avatarEmoji,
@@ -794,7 +854,7 @@ export function dotwallMultiplayerPlugin(): Plugin {
 
           user.tasksCompleted = (user.tasksCompleted || 0) + 1;
           let bonusPoints = 0;
-          if (Number(body.dailyStageIndex) === 5) {
+          if (completedTodayCount === 5) {
             bonusPoints = 250;
             if (!user.achievements.includes('daily_five_sweep')) {
               user.achievements.push('daily_five_sweep');

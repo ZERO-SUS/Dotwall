@@ -1,31 +1,83 @@
 {
   "rules": {
+    ".read": false,
+    ".write": false,
     "users": {
       ".read": true,
       "$uid": {
-        ".write": "auth != null && auth.uid === $uid",
-        ".validate": "newData.hasChildren(['id', 'username', 'points', 'pixelsPlaced']) && newData.child('id').val() === $uid && newData.child('username').isString() && newData.child('username').val().length >= 2 && newData.child('username').val().length <= 24 && newData.child('pixelsPlaced').isNumber() && newData.child('pixelsPlaced').val() >= 0 && (!data.exists() || newData.child('points').val() <= data.child('points').val() + 380)"
+        ".write": "auth != null && auth.uid === $uid && newData.exists()",
+        ".validate": "newData.hasChildren(['id', 'username', 'displayName', 'avatarEmoji', 'avatarColor', 'bio', 'pixelsPlaced', 'tasksCompleted', 'points', 'joinedAt']) && newData.child('id').val() === $uid && newData.child('username').isString() && newData.child('username').val().length >= 2 && newData.child('username').val().length <= 24 && newData.child('displayName').isString() && newData.child('displayName').val().length <= 32 && newData.child('bio').isString() && newData.child('bio').val().length <= 160 && newData.child('avatarEmoji').isString() && newData.child('avatarEmoji').val().length <= 8 && newData.child('avatarColor').isString() && newData.child('avatarColor').val().matches(/^#[0-9A-Fa-f]{6}$/) && newData.child('pixelsPlaced').isNumber() && newData.child('tasksCompleted').isNumber() && newData.child('points').isNumber() && (!data.exists() ? (newData.child('pixelsPlaced').val() === 0 && newData.child('tasksCompleted').val() === 0 && newData.child('points').val() === 50) : ((newData.child('pixelsPlaced').val() === data.child('pixelsPlaced').val() && newData.child('tasksCompleted').val() === data.child('tasksCompleted').val() && newData.child('points').val() === data.child('points').val()) || (newData.child('pixelsPlaced').val() === data.child('pixelsPlaced').val() + 1 && newData.child('tasksCompleted').val() === data.child('tasksCompleted').val() && (newData.child('points').val() === data.child('points').val() + 10 || newData.child('points').val() === data.child('points').val() + 12) && (!root.child('cooldowns/' + $uid + '/nextCooldownAt').exists() || root.child('cooldowns/' + $uid + '/nextCooldownAt').val() <= now) && newData.parent().parent().child('cooldowns/' + $uid + '/lastPlacedAt').val() === now)))",
+        "id": { ".validate": "newData.val() === $uid" },
+        "username": { ".validate": "newData.isString()" },
+        "displayName": { ".validate": "newData.isString()" },
+        "avatarEmoji": { ".validate": "newData.isString()" },
+        "avatarColor": { ".validate": "newData.isString()" },
+        "bio": { ".validate": "newData.isString()" },
+        "pixelsPlaced": { ".validate": "newData.isNumber()" },
+        "tasksCompleted": { ".validate": "newData.isNumber()" },
+        "points": { ".validate": "newData.isNumber()" },
+        "joinedAt": { ".validate": "newData.isNumber()" },
+        "lastPixelAt": { ".validate": "newData.isNumber()" },
+        "nextCooldownAt": { ".validate": "newData.isNumber()" },
+        "achievements": { ".validate": true },
+        "updatedAt": { ".validate": "newData.isNumber()" },
+        "$other": { ".validate": false }
       }
     },
     "presence": {
       ".read": true,
       "$uid": {
-        ".write": "auth != null && auth.uid === $uid"
+        "connections": {
+          "$tabId": {
+            ".write": "auth != null && auth.uid === $uid",
+            ".validate": "!newData.exists() || (newData.hasChildren(['userId', 'username', 'avatarEmoji', 'avatarColor', 'activeView', 'lastSeenAt']) && newData.child('userId').val() === $uid && newData.child('username').isString() && newData.child('username').val().length <= 24 && newData.child('lastSeenAt').val() === now)",
+            "userId": { ".validate": "newData.val() === $uid" },
+            "username": { ".validate": "newData.isString()" },
+            "avatarEmoji": { ".validate": "newData.isString()" },
+            "avatarColor": { ".validate": "newData.isString()" },
+            "activeView": { ".validate": "newData.isString()" },
+            "lastSeenAt": { ".validate": "newData.val() === now" },
+            "$other": { ".validate": false }
+          }
+        },
+        "$other": {
+          ".validate": false
+        }
       }
     },
     "cooldowns": {
       ".read": "auth != null",
       "$uid": {
-        ".write": "auth != null && auth.uid === $uid",
-        ".validate": "newData.hasChildren(['uid', 'lastPlacedAt', 'nextCooldownAt']) && newData.child('uid').val() === $uid && (!data.exists() || data.child('nextCooldownAt').val() <= now || newData.child('nextCooldownAt').val() === 0)"
+        ".write": "auth != null && auth.uid === $uid && newData.exists() && (!data.exists() || data.child('nextCooldownAt').val() <= now)",
+        ".validate": "newData.hasChildren(['uid', 'lastPlacedAt', 'nextCooldownAt', 'targetKey', 'targetVersion']) && newData.child('uid').val() === $uid && newData.child('lastPlacedAt').val() === now && newData.child('nextCooldownAt').isNumber() && newData.child('nextCooldownAt').val() >= now + 30000 && newData.child('nextCooldownAt').val() <= now + 31000 && newData.child('targetKey').isString() && newData.child('targetKey').val().length <= 24 && newData.child('targetVersion').isNumber() && newData.child('targetVersion').val() >= 1",
+        "uid": { ".validate": "newData.val() === $uid" },
+        "lastPlacedAt": { ".validate": "newData.val() === now" },
+        "nextCooldownAt": { ".validate": "newData.isNumber()" },
+        "targetKey": { ".validate": "newData.isString()" },
+        "targetVersion": { ".validate": "newData.isNumber()" },
+        "$other": {
+          ".validate": false
+        }
       }
     },
     "canvasChunks": {
       ".read": true,
       "$chunkId": {
+        ".validate": "$chunkId.matches(/^([0-9]|1[0-9])_([0-9]|1[0-9])$/)",
         "$pixelKey": {
-          ".write": "auth != null && (!root.child('cooldowns/' + auth.uid + '/nextCooldownAt').exists() || root.child('cooldowns/' + auth.uid + '/nextCooldownAt').val() <= now + 31000)",
-          ".validate": "!newData.exists() || (newData.hasChildren(['x', 'y', 'color', 'ownerId', 'ownerUsername', 'version', 'updatedAt']) && newData.child('ownerId').val() === auth.uid && newData.child('x').isNumber() && newData.child('x').val() >= 0 && newData.child('x').val() < 1000 && newData.child('y').isNumber() && newData.child('y').val() >= 0 && newData.child('y').val() < 1000 && newData.child('color').isString() && newData.child('color').val().matches(/^#[0-9A-Fa-f]{6}$/))"
+          ".write": "auth != null && ((newData.exists() && (!root.child('cooldowns/' + auth.uid + '/nextCooldownAt').exists() || root.child('cooldowns/' + auth.uid + '/nextCooldownAt').val() <= now) && newData.parent().parent().parent().child('cooldowns/' + auth.uid + '/lastPlacedAt').val() === now && newData.parent().parent().parent().child('cooldowns/' + auth.uid + '/targetKey').val() === ($chunkId + '/' + $pixelKey) && newData.parent().parent().parent().child('cooldowns/' + auth.uid + '/targetVersion').val() === newData.child('version').val() && newData.child('ownerId').val() === auth.uid && newData.child('version').val() === (data.exists() ? data.child('version').val() + 1 : 1) && (!data.exists() ? (!newData.child('prevColor').exists() && !newData.child('prevOwnerId').exists()) : (newData.child('prevColor').val() === data.child('color').val() && newData.child('prevOwnerId').val() === data.child('ownerId').val() && newData.child('prevOwnerUsername').val() === data.child('ownerUsername').val()))) || (data.exists() && data.child('ownerId').val() === auth.uid && (!newData.exists() ? !data.child('prevColor').exists() : (data.child('prevColor').exists() && newData.child('color').val() === data.child('prevColor').val() && newData.child('ownerId').val() === data.child('prevOwnerId').val() && newData.child('ownerUsername').val() === data.child('prevOwnerUsername').val() && newData.child('version').val() === data.child('version').val() + 1 && !newData.child('prevColor').exists()))))",
+          ".validate": "!newData.exists() || (newData.hasChildren(['x', 'y', 'color', 'ownerId', 'ownerUsername', 'version', 'updatedAt']) && $pixelKey === (newData.child('x').val() + '_' + newData.child('y').val()) && newData.child('x').isNumber() && newData.child('x').val() >= 0 && newData.child('x').val() < 1000 && newData.child('y').isNumber() && newData.child('y').val() >= 0 && newData.child('y').val() < 1000 && newData.child('color').isString() && newData.child('color').val().matches(/^#[0-9A-F]{6}$/) && newData.child('ownerId').isString() && newData.child('ownerUsername').isString() && newData.child('ownerUsername').val().length <= 24 && newData.child('version').isNumber() && newData.child('updatedAt').val() === now)",
+          "x": { ".validate": "newData.isNumber()" },
+          "y": { ".validate": "newData.isNumber()" },
+          "color": { ".validate": "newData.isString()" },
+          "ownerId": { ".validate": "newData.isString()" },
+          "ownerUsername": { ".validate": "newData.isString()" },
+          "version": { ".validate": "newData.isNumber()" },
+          "updatedAt": { ".validate": "newData.isNumber()" },
+          "prevColor": { ".validate": "newData.isString() && newData.val().matches(/^#[0-9A-F]{6}$/)" },
+          "prevOwnerId": { ".validate": "newData.isString()" },
+          "prevOwnerUsername": { ".validate": "newData.isString()" },
+          "$other": { ".validate": false }
         }
       }
     },
@@ -33,43 +85,55 @@
       ".read": true,
       ".indexOn": ["createdAt", "userId"],
       "$placementId": {
-        ".write": "auth != null && (!data.exists() ? newData.child('userId').val() === auth.uid : data.child('userId').val() === auth.uid)",
-        ".validate": "newData.hasChildren(['id', 'x', 'y', 'userId', 'username', 'createdAt'])"
+        ".write": "auth != null && ((!data.exists() && newData.exists() && newData.child('userId').val() === auth.uid && newData.child('createdAt').val() === now && (!root.child('cooldowns/' + auth.uid + '/nextCooldownAt').exists() || root.child('cooldowns/' + auth.uid + '/nextCooldownAt').val() <= now) && newData.parent().parent().child('cooldowns/' + auth.uid + '/lastPlacedAt').val() === now) || (data.exists() && newData.exists() && data.child('userId').val() === auth.uid && data.child('undone').val() === false && newData.child('undone').val() === true && newData.child('x').val() === data.child('x').val() && newData.child('y').val() === data.child('y').val() && newData.child('newColor').val() === data.child('newColor').val() && newData.child('userId').val() === data.child('userId').val() && newData.child('createdAt').val() === data.child('createdAt').val()))",
+        ".validate": "newData.hasChildren(['id', 'x', 'y', 'newColor', 'userId', 'username', 'actionType', 'pixelVersion', 'undone', 'createdAt']) && newData.child('id').val() === $placementId && newData.child('x').isNumber() && newData.child('x').val() >= 0 && newData.child('x').val() < 1000 && newData.child('y').isNumber() && newData.child('y').val() >= 0 && newData.child('y').val() < 1000 && newData.child('newColor').isString() && newData.child('newColor').val().matches(/^#[0-9A-F]{6}$/) && newData.child('undone').isBoolean()"
       }
     },
     "taskClaims": {
       ".read": "auth != null",
       "$claimId": {
-        ".write": "auth != null && !data.exists() && newData.child('uid').val() === auth.uid"
+        ".write": "auth != null && !data.exists() && newData.exists() && newData.child('uid').val() === auth.uid && $claimId === (auth.uid + '_' + newData.child('taskId').val() + '_' + newData.child('utcDateKey').val())",
+        ".validate": "newData.hasChildren(['uid', 'taskId', 'utcDateKey', 'claimedAt']) && newData.child('taskId').isString() && newData.child('utcDateKey').isString() && newData.child('utcDateKey').val().matches(/^20[2-9][0-9]-[0-1][0-9]-[0-3][0-9]$/) && newData.child('claimedAt').val() === now"
       }
     },
     "taskSubmissions": {
       ".read": true,
       ".indexOn": ["createdAt", "userId"],
       "$subId": {
-        ".write": "auth != null && !data.exists() && newData.child('userId').val() === auth.uid"
+        ".write": "auth != null && !data.exists() && newData.exists() && newData.child('userId').val() === auth.uid",
+        ".validate": "newData.hasChildren(['id', 'taskId', 'userId', 'username', 'gridSize', 'pixels', 'accuracyScore', 'pointsAwarded', 'createdAt']) && newData.child('id').val() === $subId && newData.child('createdAt').val() === now"
       }
     },
     "artworks": {
       ".read": true,
       ".indexOn": ["createdAt", "creatorId"],
       "$artId": {
-        ".write": "auth != null && (!data.exists() ? newData.child('creatorId').val() === auth.uid : true)",
-        ".validate": "newData.hasChildren(['id', 'title', 'creatorId', 'creatorUsername', 'pixels']) && newData.child('title').isString() && newData.child('title').val().length >= 1 && newData.child('title').val().length <= 80"
+        ".write": "auth != null && !data.exists() && newData.exists() && newData.child('creatorId').val() === auth.uid",
+        ".validate": "newData.hasChildren(['id', 'title', 'description', 'category', 'gridSize', 'pixels', 'creatorId', 'creatorUsername', 'createdAt']) && newData.child('id').val() === $artId && newData.child('title').isString() && newData.child('title').val().length >= 1 && newData.child('title').val().length <= 80 && newData.child('description').isString() && newData.child('description').val().length <= 280 && newData.child('createdAt').val() === now"
+      }
+    },
+    "artworkLikes": {
+      ".read": true,
+      "$artId": {
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "newData.isBoolean()"
+        }
       }
     },
     "comments": {
       ".read": true,
       ".indexOn": ["createdAt", "artworkId"],
       "$commentId": {
-        ".write": "auth != null && (!data.exists() ? newData.child('userId').val() === auth.uid : true)",
-        ".validate": "newData.hasChildren(['id', 'userId', 'username', 'content', 'createdAt']) && newData.child('content').isString() && newData.child('content').val().length >= 1 && newData.child('content').val().length <= 500"
+        ".write": "auth != null && !data.exists() && newData.exists() && newData.child('userId').val() === auth.uid",
+        ".validate": "newData.hasChildren(['id', 'userId', 'username', 'content', 'createdAt']) && newData.child('id').val() === $commentId && newData.child('content').isString() && newData.child('content').val().length >= 1 && newData.child('content').val().length <= 500 && newData.child('createdAt').val() === now"
       }
     },
     "reports": {
-      ".read": "auth != null",
+      ".read": false,
       "$reportId": {
-        ".write": "auth != null && !data.exists()"
+        ".write": "auth != null && !data.exists() && newData.exists() && newData.child('reporterId').val() === auth.uid",
+        ".validate": "newData.hasChildren(['id', 'targetId', 'reporterId', 'reason', 'createdAt']) && newData.child('id').val() === $reportId && newData.child('reason').isString() && newData.child('reason').val().length >= 3 && newData.child('reason').val().length <= 300 && newData.child('createdAt').val() === now"
       }
     }
   }

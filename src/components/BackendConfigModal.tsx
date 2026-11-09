@@ -3,6 +3,7 @@ import { CheckCircle2, Cloud, Copy, Flame, Server, ShieldAlert, X } from 'lucide
 import { getSupabaseConfig, saveRuntimeSupabaseConfig } from '../lib/supabase';
 import { getFirebaseConfig, saveRuntimeFirebaseConfig } from '../lib/firebase';
 import { firebaseConfig } from '../firebase/config';
+import databaseRulesObject from '../../database.rules.json';
 
 interface BackendConfigModalProps {
   isOpen: boolean;
@@ -13,74 +14,7 @@ interface BackendConfigModalProps {
   onConfigSaved: () => void;
 }
 
-const RECOMMENDED_DATABASE_RULES = `{
-  "rules": {
-    "users": {
-      ".read": true,
-      "$uid": {
-        ".write": "auth != null && auth.uid === $uid"
-      }
-    },
-    "presence": {
-      ".read": true,
-      "$uid": {
-        ".write": "auth != null && auth.uid === $uid"
-      }
-    },
-    "cooldowns": {
-      "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid"
-      }
-    },
-    "canvasChunks": {
-      ".read": true,
-      "$chunkId": {
-        "$coordKey": {
-          ".write": "auth != null && (!newData.exists() || newData.child('uid').val() === auth.uid)"
-        }
-      }
-    },
-    "placements": {
-      ".read": true,
-      "$eventId": {
-        ".write": "auth != null && newData.child('userId').val() === auth.uid"
-      }
-    },
-    "taskClaims": {
-      ".read": "auth != null",
-      "$claimKey": {
-        ".write": "auth != null && !data.exists() && newData.child('userId').val() === auth.uid"
-      }
-    },
-    "taskSubmissions": {
-      ".read": true,
-      "$subId": {
-        ".write": "auth != null && newData.child('userId').val() === auth.uid"
-      }
-    },
-    "artworks": {
-      ".read": true,
-      "$artId": {
-        ".write": "auth != null"
-      }
-    },
-    "comments": {
-      ".read": true,
-      "$artId": {
-        "$commentId": {
-          ".write": "auth != null && newData.child('userId').val() === auth.uid"
-        }
-      }
-    },
-    "reports": {
-      ".read": "auth != null",
-      "$reportId": {
-        ".write": "auth != null && newData.child('reporterId').val() === auth.uid"
-      }
-    }
-  }
-}`;
+const RECOMMENDED_DATABASE_RULES = JSON.stringify(databaseRulesObject, null, 2);
 
 export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
   isOpen,
@@ -146,7 +80,7 @@ export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
         <div className="modal-header">
           <div>
             <span className="genz-pill daily">FIREBASE PROJECT: {firebaseConfig.projectId}</span>
-            <h2 className="modal-title">Firebase Auth, Realtime DB &amp; Cloud Setup</h2>
+            <h2 className="modal-title">Firebase Auth, Realtime DB &amp; Security Rules</h2>
           </div>
           <button type="button" className="icon-close-btn" onClick={onClose}>
             <X size={18} />
@@ -162,7 +96,8 @@ export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
                 <strong>Connected to Firebase ({firebaseConfig.projectId})</strong>
                 <p>
                   Firebase Auth + Realtime Database (`asia-southeast1`) active ({onlineCount} players
-                  online).
+                  online). Note: Cloud Functions are not deployed on Spark tier; RTDB Security Rules
+                  enforce atomic cooldowns and ownership.
                 </p>
               </div>
             </>
@@ -185,14 +120,14 @@ export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
                     : 'Global Canvas Sync Active'}
                 </strong>
                 <p>
-                  {onlineCount} active player(s) online · Firebase Authentication is live!
+                  {onlineCount} active player(s) online · Publish `database.rules.json` in Firebase
+                  Console to enable direct RTDB writes.
                 </p>
               </div>
             </>
           )}
         </div>
 
-        {/* If Firebase RTDB returned PERMISSION_DENIED, show 1-click copy rules helper */}
         {rtdbStatus === 'permission-denied' && (
           <div
             className="card"
@@ -213,9 +148,8 @@ export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
               </button>
             </div>
             <p className="empty-line" style={{ marginTop: 6, fontSize: 12 }}>
-              Your Firebase Auth (`dotwall-13046`) is live, and the app is seamlessly syncing! To unlock
-              direct client-to-RTDB writes on <code>dotwall-13046-default-rtdb</code>, paste{' '}
-              <code>database.rules.json</code> into Firebase Console → Realtime Database → Rules.
+              Paste the audited <code>database.rules.json</code> into Firebase Console → Realtime
+              Database → Rules and click Publish.
             </p>
           </div>
         )}
@@ -226,7 +160,7 @@ export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
           </h3>
           <p className="empty-line" style={{ marginBottom: 10 }}>
             Configured with production <code>dotwall-13046</code> credentials (`asia-southeast1` RTDB +
-            Firebase Auth + Analytics):
+            Firebase Auth + Analytics <code>{firebaseConfig.measurementId}</code>):
           </p>
 
           <div className="form-group">
@@ -241,7 +175,7 @@ export const BackendConfigModal: React.FC<BackendConfigModalProps> = ({
 
           <div className="modal-actions" style={{ marginTop: 14 }}>
             <button type="button" className="btn" onClick={handleCopyRules}>
-              <Copy size={14} /> {copiedRules ? 'Copied Security Rules!' : 'Copy Security Rules JSON'}
+              <Copy size={14} /> {copiedRules ? 'Copied Audited Rules!' : 'Copy Audited database.rules.json'}
             </button>
             <button type="button" className="btn" onClick={onClose}>
               Close

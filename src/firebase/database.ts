@@ -6,15 +6,15 @@ import {
   push,
   onValue,
   runTransaction,
+  serverTimestamp,
   query,
   limitToLast,
   type Unsubscribe,
 } from 'firebase/database';
 import { getFirebaseDb } from './app';
-import { CANVAS_DIMENSION, CHUNK_SIZE, MAX_GLOBAL_PIXELS, PLAYER_COOLDOWN_MS } from './config';
+import { CANVAS_DIMENSION, CHUNK_SIZE, PLAYER_COOLDOWN_MS } from './config';
 import type {
   CommunityArtwork,
-  CommunityComment,
   GlobalPixel,
   PixelHistoryEntry,
   PlayerProfile,
@@ -49,14 +49,12 @@ export function getVisibleChunkIds(
     Math.floor((centerY + halfSpanY) / CHUNK_SIZE)
   );
 
-  // Cap active simultaneous chunk listeners if zoomed all the way out
   const ids: string[] = [];
   for (let cy = minY; cy <= maxY; cy++) {
     for (let cx = minX; cx <= maxX; cx++) {
       ids.push(`${cx}_${cy}`);
     }
   }
-  // Always ensure the central plaza chunks (9_9, 9_10, 10_9, 10_10) are included
   for (const plaza of ['9_9', '9_10', '10_9', '10_10']) {
     if (!ids.includes(plaza)) ids.push(plaza);
   }
@@ -64,7 +62,11 @@ export function getVisibleChunkIds(
 }
 
 /**
- * Atomic Pixel Placement with Cooldown & Coordinate Validation
+ * Atomic Multi-Path Pixel Placement with Server-Timestamped Cooldown Lock:
+ * Writes `cooldowns/{uid}`, `canvasChunks/{chunkId}/{x}_{y}`, `placements/{historyId}`,
+ * and `users/{uid}` in a SINGLE atomic `update(ref(db), updates)` call so `database.rules.json`
+ * can cross-validate `newData.parent().parent().parent().child('cooldowns/' + auth.uid)`
+ * and guarantee 1 pixel per 30 seconds without any rollback loophole.
  */
 export async function placePixelInFirebase(params: {
   user: PlayerProfile;
@@ -81,7 +83,14 @@ export async function placePixelInFirebase(params: {
 }> {
   const { user, x, y, color } = params;
 
-  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= CANVAS_DIMENSION || y < 0 || y >= CANVAS_DIMENSION) {
+  if (
+    !Number.isInteger(x) ||
+    !Number.isInteger(y) ||
+    x < 0 ||
+    x >= CANVAS_DIMENSION ||
+    y < 0 ||
+    y >= CANVAS_DIMENSION
+  ) {
     return { ok: false, error: 'Coordinates must be integers between (0, 0) and (999, 999).' };
   }
 
@@ -92,116 +101,133 @@ export async function placePixelInFirebase(params: {
 
   const db = getFirebaseDb();
   const now = Date.now();
-  const cooldownRef = ref(db, `cooldowns/${user.id}`);
-
-  // 1. Atomic transaction on player's UID cooldown node
-  let assignedNextCooldown = now + PLAYER_COOLDOWN_MS;
-  try {
-    const cdResult = await runTransaction(cooldownRef, (current) => {
-      if (current && current.nextCooldownAt && now < Number(current.nextCooldownAt)) {
-        // Abort transaction — player is still on cooldown
-        return;
-      }
-      return {
-        uid: user.id,
-        lastPlacedAt: now,
-        nextCooldownAt: assignedNextCooldown,
-      };
-    });
-
-    if (!cdResult.committed) {
-      const snap = cdResult.snapshot.val();
-      const rem = snap?.nextCooldownAt ? Math.ceil((Number(snap.nextCooldownAt) - now) / 1000) : 30;
-      return {
-        ok: false,
-        error: `Cooldown active! Wait ${Math.max(1, rem)}s before placing your next pixel.`,
-        nextCooldownAt: Number(snap?.nextCooldownAt || now + 5000),
-      };
-    }
-  } catch (err: any) {
-    return {
-      ok: false,
-      error: err?.message || 'Could not verify cooldown with database.',
-    };
-  }
-
-  // 2. Atomic transaction on the target pixel coordinate inside its 50x50 chunk
   const chunkId = getChunkId(x, y);
   const pixelKey = `${x}_${y}`;
-  const pixelRef = ref(db, `canvasChunks/${chunkId}/${pixelKey}`);
+  const targetKey = `${chunkId}/${pixelKey}`;
 
-  let prevPixel: GlobalPixel | null = null;
-  let committedPixel: GlobalPixel | null = null;
+  // Read current cooldown and current pixel state before composing atomic multi-path write
+  const [cdSnap, pxSnap, userSnap] = await Promise.all([
+    get(ref(db, `cooldowns/${user.id}`)),
+    get(ref(db, `canvasChunks/${chunkId}/${pixelKey}`)),
+    get(ref(db, `users/${user.id}`)),
+  ]);
 
-  try {
-    const pxTx = await runTransaction(pixelRef, (existing) => {
-      if (existing) {
-        prevPixel = existing as GlobalPixel;
-      }
-      const nextVersion = existing ? Number(existing.version || 1) + 1 : 1;
-      const next: GlobalPixel = {
-        x,
-        y,
-        color: cleanColor,
-        ownerId: user.id,
-        ownerUsername: user.username,
-        version: nextVersion,
-        updatedAt: now,
+  if (cdSnap.exists()) {
+    const cdVal = cdSnap.val();
+    if (cdVal?.nextCooldownAt && now < Number(cdVal.nextCooldownAt)) {
+      const rem = Math.max(1, Math.ceil((Number(cdVal.nextCooldownAt) - now) / 1000));
+      return {
+        ok: false,
+        error: `Cooldown active! Wait ${rem}s before placing your next pixel.`,
+        nextCooldownAt: Number(cdVal.nextCooldownAt),
       };
-      return next;
-    });
+    }
+  }
 
-    committedPixel = pxTx.snapshot.val() as GlobalPixel;
-  } catch (err: any) {
-    // Rollback cooldown so failed requests never consume cooldown!
-    await set(cooldownRef, { uid: user.id, lastPlacedAt: 0, nextCooldownAt: 0 }).catch(() => {});
-    return {
-      ok: false,
-      error: err?.message || 'Failed to write pixel to chunk.',
+  const existingPixel = pxSnap.exists() ? (pxSnap.val() as GlobalPixel) : null;
+  const isReplacement = Boolean(existingPixel);
+  const nextVersion = existingPixel ? Number(existingPixel.version || 1) + 1 : 1;
+  const assignedNextCooldown = now + PLAYER_COOLDOWN_MS + 400; // +400ms network buffer so >= now + 30000 on server
+  const historyId = `hist_${now}_${user.id.slice(0, 5)}`;
+
+  const pixelPayload: Record<string, any> = {
+    x,
+    y,
+    color: cleanColor,
+    ownerId: user.id,
+    ownerUsername: user.username.slice(0, 24),
+    version: nextVersion,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (existingPixel) {
+    pixelPayload.prevColor = existingPixel.color;
+    pixelPayload.prevOwnerId = existingPixel.ownerId;
+    pixelPayload.prevOwnerUsername = existingPixel.ownerUsername;
+  }
+
+  const historyPayload: Record<string, any> = {
+    id: historyId,
+    x,
+    y,
+    prevColor: existingPixel ? existingPixel.color : null,
+    prevOwnerId: existingPixel ? existingPixel.ownerId : null,
+    prevOwnerUsername: existingPixel ? existingPixel.ownerUsername : null,
+    newColor: cleanColor,
+    userId: user.id,
+    username: user.username.slice(0, 24),
+    actionType: isReplacement ? 'replace' : 'place',
+    pixelVersion: nextVersion,
+    undone: false,
+    createdAt: serverTimestamp(),
+  };
+
+  const multiPathUpdates: Record<string, any> = {
+    [`cooldowns/${user.id}`]: {
+      uid: user.id,
+      lastPlacedAt: serverTimestamp(),
+      nextCooldownAt: assignedNextCooldown,
+      targetKey,
+      targetVersion: nextVersion,
+    },
+    [`canvasChunks/${chunkId}/${pixelKey}`]: pixelPayload,
+    [`placements/${historyId}`]: historyPayload,
+  };
+
+  if (userSnap.exists()) {
+    const u = userSnap.val();
+    const ach = new Set<string>(Array.isArray(u.achievements) ? u.achievements : []);
+    ach.add('first_dot');
+    if (isReplacement) ach.add('pixel_modifier');
+    if (Number(u.pixelsPlaced || 0) + 1 >= 10) ach.add('pixel_ten');
+    if (Number(u.pixelsPlaced || 0) + 1 >= 50) ach.add('pixel_fifty');
+
+    multiPathUpdates[`users/${user.id}`] = {
+      ...u,
+      id: user.id,
+      pixelsPlaced: Number(u.pixelsPlaced || 0) + 1,
+      tasksCompleted: Number(u.tasksCompleted || 0),
+      points: Number(u.points || 50) + (isReplacement ? 12 : 10),
+      lastPixelAt: serverTimestamp(),
+      nextCooldownAt: assignedNextCooldown,
+      achievements: Array.from(ach),
     };
   }
 
-  const isReplacement = Boolean(prevPixel);
+  try {
+    await update(ref(db), multiPathUpdates);
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: err?.message || 'Atomic pixel placement rejected by database security rules.',
+    };
+  }
 
-  // 3. Record placement history entry & update global occupied counter if new slot
-  const historyId = `hist_${now}_${user.id.slice(0, 5)}`;
+  const committedPixel: GlobalPixel = {
+    x,
+    y,
+    color: cleanColor,
+    ownerId: user.id,
+    ownerUsername: user.username,
+    version: nextVersion,
+    updatedAt: now,
+  };
+
   const historyEntry: PixelHistoryEntry = {
     id: historyId,
     x,
     y,
-    prevColor: prevPixel ? (prevPixel as GlobalPixel).color : null,
-    prevOwnerId: prevPixel ? (prevPixel as GlobalPixel).ownerId : null,
-    prevOwnerUsername: prevPixel ? (prevPixel as GlobalPixel).ownerUsername : null,
+    prevColor: existingPixel ? existingPixel.color : null,
+    prevOwnerId: existingPixel ? existingPixel.ownerId : null,
+    prevOwnerUsername: existingPixel ? existingPixel.ownerUsername : null,
     newColor: cleanColor,
     userId: user.id,
     username: user.username,
     actionType: isReplacement ? 'replace' : 'place',
-    pixelVersion: committedPixel.version,
+    pixelVersion: nextVersion,
     undone: false,
     createdAt: now,
   };
-
-  await set(ref(db, `placements/${historyId}`), historyEntry).catch(() => {});
-
-  // Update user's trusted stats atomically
-  const userRef = ref(db, `users/${user.id}`);
-  await runTransaction(userRef, (u) => {
-    if (!u) return u;
-    const ach = new Set<string>(Array.isArray(u.achievements) ? u.achievements : []);
-    ach.add('first_dot');
-    if (isReplacement) ach.add('pixel_modifier');
-    if ((u.pixelsPlaced || 0) + 1 >= 10) ach.add('pixel_ten');
-    if ((u.pixelsPlaced || 0) + 1 >= 50) ach.add('pixel_fifty');
-
-    return {
-      ...u,
-      pixelsPlaced: Number(u.pixelsPlaced || 0) + 1,
-      points: Number(u.points || 0) + (isReplacement ? 12 : 10),
-      lastPixelAt: now,
-      nextCooldownAt: assignedNextCooldown,
-      achievements: Array.from(ach),
-    };
-  }).catch(() => {});
 
   return {
     ok: true,
@@ -215,7 +241,8 @@ export async function placePixelInFirebase(params: {
 /**
  * Atomic Undo Validation:
  * Only allows undoing the player's own recent placement if no other player has modified that coordinate since.
- * Does NOT reset or bypass the player's active 30-second cooldown!
+ * Enforced by `database.rules.json` via `data.child('ownerId').val() === auth.uid` and stored `prevColor`/`prevOwnerId`.
+ * Never touches `cooldowns/{uid}`, so Undo cannot reset or bypass the 30-second cooldown.
  */
 export async function undoLastPlacementInFirebase(
   user: PlayerProfile,
@@ -250,7 +277,7 @@ export async function undoLastPlacementInFirebase(
     return { ok: false, error: 'That pixel position is already empty.' };
   }
 
-  const currentPixel = snap.val() as GlobalPixel;
+  const currentPixel = snap.val() as any;
   if (
     currentPixel.ownerId !== user.id ||
     Number(currentPixel.version) !== Number(myEligible.pixelVersion)
@@ -264,23 +291,33 @@ export async function undoLastPlacementInFirebase(
   const now = Date.now();
   let restoredPixel: GlobalPixel | null = null;
 
-  if (!myEligible.prevColor) {
-    // Clearing frees that position
+  if (!currentPixel.prevColor) {
     await set(pixelRef, null);
   } else {
-    restoredPixel = {
+    const restoredPayload = {
       x: myEligible.x,
       y: myEligible.y,
-      color: myEligible.prevColor,
-      ownerId: myEligible.prevOwnerId || user.id,
-      ownerUsername: myEligible.prevOwnerUsername || user.username,
-      version: currentPixel.version + 1,
+      color: currentPixel.prevColor,
+      ownerId: currentPixel.prevOwnerId || user.id,
+      ownerUsername: currentPixel.prevOwnerUsername || user.username,
+      version: Number(currentPixel.version) + 1,
+      updatedAt: serverTimestamp(),
+    };
+    await set(pixelRef, restoredPayload);
+    restoredPixel = {
+      ...restoredPayload,
       updatedAt: now,
     };
-    await set(pixelRef, restoredPixel);
   }
 
-  await update(ref(db, `placements/${myEligible.id}`), { undone: true }).catch(() => {});
+  const histRef = ref(db, `placements/${myEligible.id}`);
+  const histSnap = await get(histRef);
+  if (histSnap.exists()) {
+    await set(histRef, {
+      ...histSnap.val(),
+      undone: true,
+    }).catch(() => {});
+  }
 
   return {
     ok: true,
@@ -291,7 +328,10 @@ export async function undoLastPlacementInFirebase(
 }
 
 /**
- * Submit Task Artwork & Grant Verified Reward (Prevents duplicate daily reward claims)
+ * Submit Task Artwork & Record Daily Task Claim
+ * Note: Without Cloud Functions (Spark Tier / Option B), task submissions and artworks are stored
+ * with write-once claim keys (`taskClaims/{uid}_{taskId}_{utcDateKey}`), while competitive XP/leaderboard
+ * mutations require Cloud Functions (Option A) to prevent client-side score spoofing.
  */
 export async function submitTaskInFirebase(params: {
   user: PlayerProfile;
@@ -338,23 +378,25 @@ export async function submitTaskInFirebase(params: {
   const claimRef = ref(db, `taskClaims/${claimKey}`);
 
   const claimSnap = await get(claimRef);
-  const alreadyClaimedToday = claimSnap.exists();
-  const grantedPoints = alreadyClaimedToday
-    ? 0
-    : rewardPoints + (dailyStageIndex === 5 ? 250 : 0);
-
-  if (!alreadyClaimedToday) {
-    await set(claimRef, {
-      uid: user.id,
-      taskId,
-      utcDateKey,
-      pointsGranted: grantedPoints,
-      claimedAt: now,
-    }).catch(() => {});
+  if (claimSnap.exists()) {
+    return {
+      ok: false,
+      error: `Duplicate daily task claim blocked: reward for "${taskId}" already claimed on ${utcDateKey} UTC.`,
+    };
   }
 
+  const grantedPoints = rewardPoints + (dailyStageIndex === 5 ? 250 : 0);
+
+  await set(claimRef, {
+    uid: user.id,
+    taskId,
+    utcDateKey,
+    pointsGranted: grantedPoints,
+    claimedAt: serverTimestamp(),
+  });
+
   const subId = `sub_${now}_${user.id.slice(0, 5)}`;
-  const submission: TaskSubmission = {
+  const submissionPayload = {
     id: subId,
     taskId,
     userId: user.id,
@@ -363,15 +405,15 @@ export async function submitTaskInFirebase(params: {
     pixels,
     accuracyScore,
     pointsAwarded: grantedPoints,
-    createdAt: now,
+    createdAt: serverTimestamp(),
   };
 
-  await set(ref(db, `taskSubmissions/${subId}`), submission).catch(() => {});
+  await set(ref(db, `taskSubmissions/${subId}`), submissionPayload);
 
   let createdArtwork: CommunityArtwork | undefined;
   if (shareToCommunity) {
     const artId = `art_${now}_${user.id.slice(0, 5)}`;
-    createdArtwork = {
+    const artworkPayload = {
       id: artId,
       title: title.slice(0, 80),
       description: description.slice(0, 280),
@@ -385,30 +427,21 @@ export async function submitTaskInFirebase(params: {
       taskId,
       likes: [user.id],
       commentsCount: 0,
+      createdAt: serverTimestamp(),
+    };
+    await set(ref(db, `artworks/${artId}`), artworkPayload);
+    createdArtwork = {
+      ...artworkPayload,
       createdAt: now,
     };
-    await set(ref(db, `artworks/${artId}`), createdArtwork).catch(() => {});
-  }
-
-  if (grantedPoints > 0) {
-    const userRef = ref(db, `users/${user.id}`);
-    await runTransaction(userRef, (u) => {
-      if (!u) return u;
-      const ach = new Set<string>(Array.isArray(u.achievements) ? u.achievements : []);
-      ach.add('task_rookie');
-      if (dailyStageIndex === 5) ach.add('daily_five_sweep');
-      return {
-        ...u,
-        tasksCompleted: Number(u.tasksCompleted || 0) + 1,
-        points: Number(u.points || 0) + grantedPoints,
-        achievements: Array.from(ach),
-      };
-    }).catch(() => {});
   }
 
   return {
     ok: true,
-    submission,
+    submission: {
+      ...submissionPayload,
+      createdAt: now,
+    },
     artwork: createdArtwork,
     pointsGranted: grantedPoints,
   };

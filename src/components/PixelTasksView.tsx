@@ -219,7 +219,7 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
     }
     const posScore = (matchedPos / refCount) * 60;
     const colorScore = (matchedColor / refCount) * 40;
-    const rawScore = arr.length > 0 ? Math.min(100, Math.max(45, Math.round(posScore + colorScore))) : 0;
+    const rawScore = arr.length > 0 ? Math.min(100, Math.round(posScore + colorScore)) : 0;
 
     return {
       progressPct: pct,
@@ -415,9 +415,9 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
   const handleCompleteAndAdvance = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeTask || isSubmitting) return;
-    if (drawnPixelsArray.length < 4) {
+    if (drawnPixelsArray.length < 4 || accuracyScore < 50) {
       setSubmitStatus({
-        text: 'Draw at least 4 pixels of the object before completing this stage!',
+        text: `Reach at least 50% Object Match Score (currently ${accuracyScore}%) before completing this stage!`,
         kind: 'error',
       });
       return;
@@ -436,7 +436,7 @@ export const PixelTasksView: React.FC<PixelTasksViewProps> = ({
     const res = await onSubmitTask({
       taskId: activeTask.id,
       pixels: drawnPixelsArray,
-      accuracyScore: Math.max(70, accuracyScore),
+      accuracyScore,
       title: submissionTitle || activeTask.title,
       description: submissionDesc,
       shareToCommunity,
