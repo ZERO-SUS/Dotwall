@@ -7,10 +7,13 @@ import type {
   PlayerProfile,
 } from '../types';
 
-const CANVAS_TOPIC = 'dotwall_global_canvas_clean_v4';
-const PRESENCE_TOPIC = 'dotwall_global_presence_clean_v4';
-const RELAY_HTTP_BASE = 'https://ntfy.sh';
-const RELAY_WS_BASE = 'wss://ntfy.sh';
+/**
+ * SECURITY HARDENING NOTE:
+ * Unauthenticated third-party pub/sub relay (`ntfy.sh`) has been disabled to prevent
+ * unverified client spoofing, unauthorized canvas erasures, and cooldown bypasses.
+ * All real-time state synchronization now flows exclusively through Firebase Realtime Database
+ * enforced by `database.rules.json`.
+ */
 
 export type GlobalRelayEvent =
   | {
@@ -108,291 +111,24 @@ export function getClientTabId(): string {
   return CLIENT_TAB_ID;
 }
 
-/**
- * Publishes a validated canvas/game/admin event to the global real-time cloud relay
- * so all connected browsers/devices worldwide receive it in <200ms.
- */
 export async function publishGlobalRelayEvent(
-  event: DistributeOmit<GlobalRelayEvent, 'senderTabId'>
+  _event: DistributeOmit<GlobalRelayEvent, 'senderTabId'>
 ): Promise<void> {
-  try {
-    const payload: GlobalRelayEvent = {
-      ...event,
-      senderTabId: CLIENT_TAB_ID,
-    } as GlobalRelayEvent;
-
-    await fetch(`${RELAY_HTTP_BASE}/${CANVAS_TOPIC}`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  } catch {
-    // Ignore transient network errors
-  }
+  // No-op: Firebase Realtime Database is the single source of truth
 }
 
-/**
- * Fetches recent global history from the cloud relay on startup so any new browser/device
- * opening https://zero-sus.github.io/Dotwall/ immediately sees pixels, erasures, user deletions,
- * artworks, and comments placed by players and admins worldwide.
- */
-export async function fetchGlobalRelayHistory(callbacks: GlobalRelayCallbacks): Promise<void> {
-  try {
-    const res = await fetch(`${RELAY_HTTP_BASE}/${CANVAS_TOPIC}/json?poll=1&since=all`);
-    if (!res.ok) return;
-    const text = await res.text();
-    const lines = text.split('\n').filter(Boolean);
-
-    for (const line of lines) {
-      try {
-        const envelope = JSON.parse(line);
-        if (envelope.event !== 'message' || !envelope.message) continue;
-        const msg = JSON.parse(envelope.message) as GlobalRelayEvent;
-        applyRelayMessage(msg, callbacks, true);
-      } catch {
-        // skip malformed line
-      }
-    }
-  } catch {
-    // ignore offline/network error
-  }
+export async function fetchGlobalRelayHistory(_callbacks: GlobalRelayCallbacks): Promise<void> {
+  // No-op: Firebase Realtime Database is the single source of truth
 }
 
-function applyRelayMessage(
-  msg: GlobalRelayEvent,
-  callbacks: GlobalRelayCallbacks,
-  isReplay = false
-) {
-  if (!isReplay && msg.senderTabId === CLIENT_TAB_ID) return;
-
-  if (msg.type === 'pixel_placed' && msg.pixel) {
-    const x = Number(msg.pixel.x);
-    const y = Number(msg.pixel.y);
-    if (
-      Number.isInteger(x) &&
-      Number.isInteger(y) &&
-      x >= 0 &&
-      x < 1000 &&
-      y >= 0 &&
-      y < 1000 &&
-      /^#[0-9A-Fa-f]{6}$/.test(msg.pixel.color || '')
-    ) {
-      callbacks.onPixelPlaced(msg.pixel, msg.historyEntry);
-    }
-  } else if (msg.type === 'pixel_undone' && typeof msg.x === 'number' && typeof msg.y === 'number') {
-    callbacks.onPixelUndone(msg.x, msg.y, msg.restoredPixel || null, msg.historyId || '');
-  } else if (msg.type === 'pixel_erased' && Array.isArray(msg.coords)) {
-    callbacks.onPixelsErased?.(msg.coords, msg.adminUsername || 'zero_sus');
-  } else if (msg.type === 'pixels_batch_placed' && Array.isArray(msg.pixels)) {
-    callbacks.onPixelsBatchPlaced?.(msg.pixels, msg.adminUsername || 'zero_sus');
-  } else if (msg.type === 'user_deleted' && (msg.userId || msg.username)) {
-    callbacks.onUserDeleted?.(msg.userId || '', msg.username || '', Boolean(msg.wipeContent));
-  } else if (msg.type === 'user_updated' && msg.user) {
-    callbacks.onUserUpdated?.(msg.user);
-  } else if (msg.type === 'artwork_published' && msg.artwork) {
-    callbacks.onArtworkPublished(msg.artwork);
-  } else if (msg.type === 'artwork_deleted' && msg.artworkId) {
-    callbacks.onArtworkDeleted?.(msg.artworkId);
-  } else if (msg.type === 'comment_posted' && msg.comment) {
-    callbacks.onCommentPosted(msg.comment);
-  } else if (msg.type === 'comment_deleted' && msg.commentId) {
-    callbacks.onCommentDeleted?.(msg.commentId);
-  } else if (msg.type === 'canvas_cleared' && msg.mode) {
-    callbacks.onCanvasCleared?.(msg.mode);
-  } else if (msg.type === 'admin_broadcast' && !isReplay && msg.message) {
-    callbacks.onAdminBroadcast?.(
-      msg.title || '👑 Admin Announcement (@zero_sus)',
-      msg.message,
-      msg.timestamp || Date.now()
-    );
-  }
+export function subscribeToGlobalRelayStream(_callbacks: GlobalRelayCallbacks): () => void {
+  return () => {};
 }
 
-/**
- * Subscribes to live WebSocket stream (`wss://ntfy.sh/.../ws`) with automatic reconnect
- * so pixels placed/erased and admin actions on any device worldwide appear in real time (< 150ms).
- */
-export function subscribeToGlobalRelayStream(callbacks: GlobalRelayCallbacks): () => void {
-  let ws: WebSocket | null = null;
-  let closedByApp = false;
-  let reconnectTimer: number | null = null;
-
-  // First replay recent global placements & admin actions
-  fetchGlobalRelayHistory(callbacks);
-
-  const connect = () => {
-    if (closedByApp) return;
-    try {
-      ws = new WebSocket(`${RELAY_WS_BASE}/${CANVAS_TOPIC}/ws`);
-      ws.onopen = () => {
-        callbacks.onConnectionState?.(true);
-      };
-      ws.onmessage = (evt) => {
-        try {
-          const envelope = JSON.parse(evt.data);
-          if (envelope.event !== 'message' || !envelope.message) return;
-          const msg = JSON.parse(envelope.message) as GlobalRelayEvent;
-          applyRelayMessage(msg, callbacks, false);
-        } catch {
-          // ignore
-        }
-      };
-      ws.onclose = () => {
-        if (!closedByApp) {
-          reconnectTimer = window.setTimeout(connect, 2500);
-        }
-      };
-      ws.onerror = () => {
-        try {
-          ws?.close();
-        } catch {
-          // ignore
-        }
-      };
-    } catch {
-      if (!closedByApp) {
-        reconnectTimer = window.setTimeout(connect, 3500);
-      }
-    }
-  };
-
-  connect();
-
-  return () => {
-    closedByApp = true;
-    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-    try {
-      ws?.close();
-    } catch {
-      // ignore
-    }
-  };
-}
-
-/**
- * Global Cross-Device Presence Stream (Deduplicated by `userId` / Firebase `uid`)
- */
 export function startGlobalRelayPresence(
-  user: PlayerProfile,
-  activeView: string,
-  onOnlinePlayersUpdate: (players: OnlinePlayerPresence[]) => void
+  _user: PlayerProfile,
+  _activeView: string,
+  _onOnlinePlayersUpdate: (players: OnlinePlayerPresence[]) => void
 ): () => void {
-  const activeMap = new Map<string, OnlinePlayerPresence>();
-  let ws: WebSocket | null = null;
-
-  const upsertAndEmit = (entry: OnlinePlayerPresence) => {
-    activeMap.set(entry.userId, entry);
-    const now = Date.now();
-    for (const [uid, p] of activeMap.entries()) {
-      if (now - p.lastSeenAt > 65_000) {
-        activeMap.delete(uid);
-      }
-    }
-    onOnlinePlayersUpdate(Array.from(activeMap.values()));
-  };
-
-  // Always include current user immediately
-  upsertAndEmit({
-    userId: user.id,
-    username: user.username,
-    avatarEmoji: user.avatarEmoji,
-    avatarColor: user.avatarColor,
-    activeView,
-    lastSeenAt: Date.now(),
-  });
-
-  const sendHeartbeat = (eventType: 'heartbeat' | 'leave' = 'heartbeat') => {
-    fetch(`${RELAY_HTTP_BASE}/${PRESENCE_TOPIC}`, {
-      method: 'POST',
-      body: JSON.stringify({
-        eventType,
-        userId: user.id,
-        username: user.username,
-        avatarEmoji: user.avatarEmoji,
-        avatarColor: user.avatarColor,
-        activeView,
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-  };
-
-  // Replay recent presence announcements from the last 60s
-  fetch(`${RELAY_HTTP_BASE}/${PRESENCE_TOPIC}/json?poll=1&since=1m`)
-    .then((r) => r.text())
-    .then((txt) => {
-      for (const line of txt.split('\n').filter(Boolean)) {
-        try {
-          const env = JSON.parse(line);
-          if (env.event !== 'message' || !env.message) continue;
-          const p = JSON.parse(env.message);
-          if (p.eventType === 'leave' && p.userId !== user.id) {
-            activeMap.delete(p.userId);
-          } else if (p.userId && Date.now() - Number(p.timestamp || 0) < 65_000) {
-            upsertAndEmit({
-              userId: p.userId,
-              username: p.username || 'player',
-              avatarEmoji: p.avatarEmoji || '👾',
-              avatarColor: p.avatarColor || '#6B3DFF',
-              activeView: p.activeView || 'home',
-              lastSeenAt: Number(p.timestamp || Date.now()),
-            });
-          }
-        } catch {
-          // ignore
-        }
-      }
-    })
-    .catch(() => {});
-
-  try {
-    ws = new WebSocket(`${RELAY_WS_BASE}/${PRESENCE_TOPIC}/ws`);
-    ws.onopen = () => {
-      sendHeartbeat('heartbeat');
-    };
-    ws.onmessage = (evt) => {
-      try {
-        const env = JSON.parse(evt.data);
-        if (env.event !== 'message' || !env.message) return;
-        const p = JSON.parse(env.message);
-        if (p.eventType === 'leave' && p.userId !== user.id) {
-          activeMap.delete(p.userId);
-          onOnlinePlayersUpdate(Array.from(activeMap.values()));
-        } else if (p.userId) {
-          upsertAndEmit({
-            userId: p.userId,
-            username: p.username || 'player',
-            avatarEmoji: p.avatarEmoji || '👾',
-            avatarColor: p.avatarColor || '#6B3DFF',
-            activeView: p.activeView || 'home',
-            lastSeenAt: Date.now(),
-          });
-        }
-      } catch {
-        // ignore
-      }
-    };
-  } catch {
-    // ignore
-  }
-
-  const interval = window.setInterval(() => {
-    upsertAndEmit({
-      userId: user.id,
-      username: user.username,
-      avatarEmoji: user.avatarEmoji,
-      avatarColor: user.avatarColor,
-      activeView,
-      lastSeenAt: Date.now(),
-    });
-    sendHeartbeat('heartbeat');
-  }, 22_000);
-
-  return () => {
-    window.clearInterval(interval);
-    sendHeartbeat('leave');
-    try {
-      ws?.close();
-    } catch {
-      // ignore
-    }
-  };
+  return () => {};
 }

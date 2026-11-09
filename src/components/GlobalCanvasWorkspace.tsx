@@ -149,6 +149,14 @@ export const GlobalCanvasWorkspace: React.FC<GlobalCanvasWorkspaceProps> = ({
     onVisibleChunksChange(chunkIds);
   }, [camera.x, camera.y, zoom, onVisibleChunksChange]);
 
+  // Reset admin-only tool and brush size if user is not verified @zero_sus
+  useEffect(() => {
+    if (!isAdmin) {
+      setAdminBrushSize(1);
+      setTool((prev) => (prev === 'erase' ? 'place' : prev));
+    }
+  }, [isAdmin]);
+
   // Listen for native fullscreen change
   useEffect(() => {
     const onFsChange = () => {

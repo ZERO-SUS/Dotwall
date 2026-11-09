@@ -6,13 +6,40 @@ import {
   sendPasswordResetEmail,
   signOut,
   updateProfile,
+  updatePassword,
   onAuthStateChanged,
   type User,
 } from 'firebase/auth';
 import { ref, get, set, update, serverTimestamp } from 'firebase/database';
 import { getFirebaseAuth, getFirebaseDb } from './app';
-import type { PlayerProfile } from '../types';
+import {
+  isReservedAdminHandle,
+  RESERVED_ADMIN_USERNAME,
+  VERIFIED_ADMIN_EMAILS,
+  type PlayerProfile,
+} from '../types';
 import { AVATAR_COLORS, AVATAR_EMOJIS } from '../constants';
+
+export function isVerifiedFirebaseAdminUser(fbUser: User | null | undefined): boolean {
+  if (!fbUser || !fbUser.email) return false;
+  const email = fbUser.email.trim().toLowerCase();
+  if (email === 'darshan99806@gmail.com') {
+    return fbUser.emailVerified === true;
+  }
+  return VERIFIED_ADMIN_EMAILS.has(email);
+}
+
+export function sanitizePublicUsername(raw: string | undefined | null, fallbackUid: string): string {
+  const cleaned = (raw || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^a-zA-Z0-9_.-]/g, '')
+    .slice(0, 22);
+  if (cleaned.length < 2 || isReservedAdminHandle(cleaned)) {
+    return `artist_${fallbackUid.slice(0, 6).toLowerCase()}`;
+  }
+  return cleaned;
+}
 
 export function formatFirebaseAuthError(error: any): string {
   const code = error?.code || '';
@@ -52,29 +79,51 @@ export async function ensurePlayerProfileInDb(
 ): Promise<PlayerProfile> {
   const db = getFirebaseDb();
   const userRef = ref(db, `users/${fbUser.uid}`);
-  const snap = await get(userRef);
+  const isAdminUser = isVerifiedFirebaseAdminUser(fbUser);
+
+  let snap = null;
+  try {
+    snap = await get(userRef);
+  } catch {
+    snap = null;
+  }
 
   const now = Date.now();
-  if (snap.exists()) {
+  if (snap && snap.exists()) {
     const data = snap.val();
-    // Ensure cooldown node check
-    const cdSnap = await get(ref(db, `cooldowns/${fbUser.uid}`));
-    const nextCooldownAt = cdSnap.exists() ? Number(cdSnap.val()?.nextCooldownAt || 0) : 0;
+    let nextCooldownAt = 0;
+    if (!isAdminUser) {
+      try {
+        const cdSnap = await get(ref(db, `cooldowns/${fbUser.uid}`));
+        nextCooldownAt = cdSnap.exists() ? Number(cdSnap.val()?.nextCooldownAt || 0) : 0;
+      } catch {
+        nextCooldownAt = 0;
+      }
+    }
+
+    const safeUsername = isAdminUser
+      ? RESERVED_ADMIN_USERNAME
+      : sanitizePublicUsername(data.username || fbUser.displayName, fbUser.uid);
 
     return {
       id: fbUser.uid,
-      username: data.username || fbUser.displayName || `user_${fbUser.uid.slice(0, 6)}`,
-      displayName: data.displayName || data.username || 'Pixel Artist',
-      avatarEmoji: data.avatarEmoji || '👾',
+      username: safeUsername,
+      displayName: isAdminUser
+        ? data.displayName || 'ZERO_SUS · Lead Developer & Admin'
+        : data.displayName || safeUsername,
+      avatarEmoji: isAdminUser ? data.avatarEmoji || '👑' : data.avatarEmoji || '👾',
       avatarColor: data.avatarColor || '#6B3DFF',
-      bio: data.bio || 'Collaborating on the 1,000,000-pixel global wall.',
+      bio: isAdminUser
+        ? data.bio || 'Creator & Lead Developer of Dotwall 1000×1000.'
+        : data.bio || 'Collaborating on the 1,000,000-pixel global wall.',
       pixelsPlaced: Number(data.pixelsPlaced || 0),
       tasksCompleted: Number(data.tasksCompleted || 0),
       points: Number(data.points || 50),
       lastPixelAt: Number(data.lastPixelAt || 0),
-      nextCooldownAt,
+      nextCooldownAt: isAdminUser ? 0 : nextCooldownAt,
       joinedAt: Number(data.joinedAt || now),
       achievements: Array.isArray(data.achievements) ? data.achievements : [],
+      ...(isAdminUser ? { isAdmin: true } : {}),
     };
   }
 
@@ -82,18 +131,27 @@ export async function ensurePlayerProfileInDb(
     overrides?.username ||
     fbUser.displayName ||
     fbUser.email?.split('@')[0] ||
-    `artist_${fbUser.uid.slice(0, 5)}`;
-  const cleanUsername = rawName.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 22) || `artist_${fbUser.uid.slice(0, 5)}`;
+    `artist_${fbUser.uid.slice(0, 6)}`;
+
+  const cleanUsername = isAdminUser
+    ? RESERVED_ADMIN_USERNAME
+    : sanitizePublicUsername(rawName, fbUser.uid);
 
   const newProfile: PlayerProfile = {
     id: fbUser.uid,
     username: cleanUsername,
-    displayName: overrides?.displayName || fbUser.displayName || cleanUsername,
-    avatarEmoji:
-      overrides?.avatarEmoji || AVATAR_EMOJIS[Math.floor(Math.random() * AVATAR_EMOJIS.length)],
-    avatarColor:
-      overrides?.avatarColor || AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)],
-    bio: 'Collaborating on the 1,000,000-pixel global Dotwall.',
+    displayName: isAdminUser
+      ? 'ZERO_SUS · Lead Developer & Admin'
+      : overrides?.displayName || fbUser.displayName || cleanUsername,
+    avatarEmoji: isAdminUser
+      ? '👑'
+      : overrides?.avatarEmoji || AVATAR_EMOJIS[Math.floor(Math.random() * AVATAR_EMOJIS.length)],
+    avatarColor: isAdminUser
+      ? '#6B3DFF'
+      : overrides?.avatarColor || AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)],
+    bio: isAdminUser
+      ? 'Creator & Lead Developer of Dotwall 1000×1000.'
+      : 'Collaborating on the 1,000,000-pixel global Dotwall.',
     pixelsPlaced: 0,
     tasksCompleted: 0,
     points: 50,
@@ -101,12 +159,33 @@ export async function ensurePlayerProfileInDb(
     nextCooldownAt: 0,
     joinedAt: now,
     achievements: [],
+    ...(isAdminUser ? { isAdmin: true } : {}),
   };
 
-  await set(userRef, {
-    ...newProfile,
-    updatedAt: serverTimestamp(),
-  });
+  try {
+    const dbPayload: Record<string, any> = {
+      id: newProfile.id,
+      username: newProfile.username,
+      displayName: newProfile.displayName,
+      avatarEmoji: newProfile.avatarEmoji,
+      avatarColor: newProfile.avatarColor,
+      bio: newProfile.bio,
+      pixelsPlaced: 0,
+      tasksCompleted: 0,
+      points: 50,
+      joinedAt: now,
+      lastPixelAt: 0,
+      nextCooldownAt: 0,
+      achievements: [],
+      updatedAt: serverTimestamp(),
+    };
+    if (isAdminUser) {
+      dbPayload.isAdmin = true;
+    }
+    await set(userRef, dbPayload);
+  } catch {
+    // Return verified profile even if RTDB rules are still initializing
+  }
 
   return newProfile;
 }
@@ -117,10 +196,25 @@ export async function registerWithEmail(params: {
   username: string;
   avatarEmoji?: string;
   avatarColor?: string;
+  isAutoBootstrap?: boolean;
 }): Promise<PlayerProfile> {
+  const cleanEmail = params.email.trim().toLowerCase();
+  if (
+    isReservedAdminHandle(params.username) ||
+    isReservedAdminHandle(cleanEmail.split('@')[0]) ||
+    VERIFIED_ADMIN_EMAILS.has(cleanEmail)
+  ) {
+    throw new Error(
+      'The @zero_sus administrator account is reserved and cannot be registered publicly.'
+    );
+  }
+  if (!params.password || params.password.length < 6) {
+    throw new Error('Password must be at least 6 characters long.');
+  }
+
   const auth = getFirebaseAuth();
-  const cred = await createUserWithEmailAndPassword(auth, params.email.trim(), params.password);
-  const cleanName = params.username.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 22);
+  const cred = await createUserWithEmailAndPassword(auth, cleanEmail, params.password);
+  const cleanName = sanitizePublicUsername(params.username, cred.user.uid);
   if (cleanName) {
     await updateProfile(cred.user, { displayName: cleanName }).catch(() => {});
   }
@@ -132,9 +226,22 @@ export async function registerWithEmail(params: {
   });
 }
 
-export async function loginWithEmail(email: string, password: string): Promise<PlayerProfile> {
+export async function loginWithEmail(emailOrUsername: string, password: string): Promise<PlayerProfile> {
+  const raw = emailOrUsername.trim();
+  const cleanedHandle = raw.replace(/^@+/, '').toLowerCase();
+  const targetEmail =
+    cleanedHandle === RESERVED_ADMIN_USERNAME
+      ? 'zero_sus@dotwall.app'
+      : raw.includes('@')
+        ? raw.toLowerCase()
+        : `${cleanedHandle}@dotwall.app`;
+
+  if (!password || password.length < 6) {
+    throw new Error('Please enter a valid password (minimum 6 characters).');
+  }
+
   const auth = getFirebaseAuth();
-  const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+  const cred = await signInWithEmailAndPassword(auth, targetEmail, password);
   return ensurePlayerProfileInDb(cred.user);
 }
 
@@ -149,6 +256,18 @@ export async function loginWithGooglePopup(): Promise<PlayerProfile> {
 export async function sendAccountPasswordReset(email: string): Promise<void> {
   const auth = getFirebaseAuth();
   await sendPasswordResetEmail(auth, email.trim());
+}
+
+export async function changeUserPassword(newPassword: string): Promise<void> {
+  const auth = getFirebaseAuth();
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('No user is currently signed in to change password.');
+  }
+  if (!newPassword || newPassword.length < 6) {
+    throw new Error('New password must be at least 6 characters long.');
+  }
+  await updatePassword(user, newPassword);
 }
 
 export async function logoutFirebaseUser(): Promise<void> {

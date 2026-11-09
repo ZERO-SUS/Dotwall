@@ -13,14 +13,35 @@ import {
 } from 'firebase/database';
 import { getFirebaseDb } from './app';
 import { CANVAS_DIMENSION, CHUNK_SIZE, PLAYER_COOLDOWN_MS } from './config';
-import type {
-  CommunityArtwork,
-  GlobalPixel,
-  PixelHistoryEntry,
-  PlayerProfile,
-  TaskPixel,
-  TaskSubmission,
+import {
+  isDeveloperAdmin,
+  isReservedAdminHandle,
+  type CommunityArtwork,
+  type CommunityComment,
+  type GlobalPixel,
+  type PixelHistoryEntry,
+  type PlayerProfile,
+  type TaskPixel,
+  type TaskSubmission,
 } from '../types';
+
+let cachedServerTimeOffsetMs = 0;
+
+export function getEstimatedServerNow(): number {
+  return Date.now() + cachedServerTimeOffsetMs;
+}
+
+export function subscribeToServerTimeOffset(onOffset?: (offsetMs: number) => void): Unsubscribe {
+  const db = getFirebaseDb();
+  const offsetRef = ref(db, '.info/serverTimeOffset');
+  return onValue(offsetRef, (snap) => {
+    const val = Number(snap.val() || 0);
+    if (Number.isFinite(val)) {
+      cachedServerTimeOffsetMs = val;
+      onOffset?.(val);
+    }
+  });
+}
 
 export function getChunkId(x: number, y: number): string {
   const cx = Math.floor(x / CHUNK_SIZE);
@@ -100,22 +121,23 @@ export async function placePixelInFirebase(params: {
   }
 
   const db = getFirebaseDb();
-  const now = Date.now();
+  const serverNow = getEstimatedServerNow();
+  const isAdmin = isDeveloperAdmin(user);
   const chunkId = getChunkId(x, y);
   const pixelKey = `${x}_${y}`;
   const targetKey = `${chunkId}/${pixelKey}`;
 
   // Read current cooldown and current pixel state before composing atomic multi-path write
   const [cdSnap, pxSnap, userSnap] = await Promise.all([
-    get(ref(db, `cooldowns/${user.id}`)),
+    isAdmin ? Promise.resolve(null) : get(ref(db, `cooldowns/${user.id}`)),
     get(ref(db, `canvasChunks/${chunkId}/${pixelKey}`)),
     get(ref(db, `users/${user.id}`)),
   ]);
 
-  if (cdSnap.exists()) {
+  if (!isAdmin && cdSnap && cdSnap.exists()) {
     const cdVal = cdSnap.val();
-    if (cdVal?.nextCooldownAt && now < Number(cdVal.nextCooldownAt)) {
-      const rem = Math.max(1, Math.ceil((Number(cdVal.nextCooldownAt) - now) / 1000));
+    if (cdVal?.nextCooldownAt && serverNow < Number(cdVal.nextCooldownAt)) {
+      const rem = Math.max(1, Math.ceil((Number(cdVal.nextCooldownAt) - serverNow) / 1000));
       return {
         ok: false,
         error: `Cooldown active! Wait ${rem}s before placing your next pixel.`,
@@ -127,8 +149,8 @@ export async function placePixelInFirebase(params: {
   const existingPixel = pxSnap.exists() ? (pxSnap.val() as GlobalPixel) : null;
   const isReplacement = Boolean(existingPixel);
   const nextVersion = existingPixel ? Number(existingPixel.version || 1) + 1 : 1;
-  const assignedNextCooldown = now + PLAYER_COOLDOWN_MS + 400; // +400ms network buffer so >= now + 30000 on server
-  const historyId = `hist_${now}_${user.id.slice(0, 5)}`;
+  const assignedNextCooldown = isAdmin ? 0 : serverNow + PLAYER_COOLDOWN_MS + 350;
+  const historyId = `hist_${serverNow}_${user.id.slice(0, 5)}`;
 
   const pixelPayload: Record<string, any> = {
     x,
@@ -163,16 +185,19 @@ export async function placePixelInFirebase(params: {
   };
 
   const multiPathUpdates: Record<string, any> = {
-    [`cooldowns/${user.id}`]: {
+    [`canvasChunks/${chunkId}/${pixelKey}`]: pixelPayload,
+    [`placements/${historyId}`]: historyPayload,
+  };
+
+  if (!isAdmin) {
+    multiPathUpdates[`cooldowns/${user.id}`] = {
       uid: user.id,
       lastPlacedAt: serverTimestamp(),
       nextCooldownAt: assignedNextCooldown,
       targetKey,
       targetVersion: nextVersion,
-    },
-    [`canvasChunks/${chunkId}/${pixelKey}`]: pixelPayload,
-    [`placements/${historyId}`]: historyPayload,
-  };
+    };
+  }
 
   if (userSnap.exists()) {
     const u = userSnap.val();
@@ -210,7 +235,7 @@ export async function placePixelInFirebase(params: {
     ownerId: user.id,
     ownerUsername: user.username,
     version: nextVersion,
-    updatedAt: now,
+    updatedAt: serverNow,
   };
 
   const historyEntry: PixelHistoryEntry = {
@@ -226,7 +251,7 @@ export async function placePixelInFirebase(params: {
     actionType: isReplacement ? 'replace' : 'place',
     pixelVersion: nextVersion,
     undone: false,
-    createdAt: now,
+    createdAt: serverNow,
   };
 
   return {
@@ -447,14 +472,137 @@ export async function submitTaskInFirebase(params: {
   };
 }
 
-export async function adminErasePixelsInFirebase(coords: { x: number; y: number }[]): Promise<void> {
+export async function updateProfileInFirebase(
+  user: PlayerProfile,
+  payload: {
+    username: string;
+    displayName: string;
+    bio: string;
+    avatarEmoji: string;
+    avatarColor: string;
+  }
+): Promise<{ ok: boolean; error?: string; user?: PlayerProfile }> {
+  const isAdmin = isDeveloperAdmin(user);
+  const cleanUsername = payload.username
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^a-zA-Z0-9_.-]/g, '')
+    .slice(0, 24);
+
+  if (cleanUsername.length < 2) {
+    return { ok: false, error: 'Username must be at least 2 characters.' };
+  }
+  if (!isAdmin && isReservedAdminHandle(cleanUsername)) {
+    return { ok: false, error: 'That username is reserved and cannot be used.' };
+  }
+
+  const db = getFirebaseDb();
+  const userRef = ref(db, `users/${user.id}`);
+  try {
+    const snap = await get(userRef);
+    const existing = snap.exists() ? snap.val() : user;
+    const updatedProfile: PlayerProfile = {
+      id: user.id,
+      username: isAdmin ? 'zero_sus' : cleanUsername,
+      displayName: payload.displayName.replace(/[<>]/g, '').trim().slice(0, 32) || cleanUsername,
+      bio: payload.bio.replace(/[<>]/g, '').trim().slice(0, 160),
+      avatarEmoji: payload.avatarEmoji.slice(0, 8) || '👾',
+      avatarColor: /^#[0-9A-Fa-f]{6}$/.test(payload.avatarColor) ? payload.avatarColor : '#6B3DFF',
+      pixelsPlaced: Number(existing.pixelsPlaced ?? user.pixelsPlaced ?? 0),
+      tasksCompleted: Number(existing.tasksCompleted ?? user.tasksCompleted ?? 0),
+      points: Number(existing.points ?? user.points ?? 50),
+      joinedAt: Number(existing.joinedAt ?? user.joinedAt ?? Date.now()),
+      lastPixelAt: Number(existing.lastPixelAt ?? user.lastPixelAt ?? 0),
+      nextCooldownAt: isAdmin ? 0 : Number(existing.nextCooldownAt ?? user.nextCooldownAt ?? 0),
+      achievements: Array.isArray(existing.achievements)
+        ? existing.achievements
+        : user.achievements || [],
+      ...(isAdmin ? { isAdmin: true } : {}),
+    };
+
+    const dbPayload: Record<string, any> = {
+      ...updatedProfile,
+      updatedAt: serverTimestamp(),
+    };
+    await set(userRef, dbPayload);
+    return { ok: true, user: updatedProfile };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Could not update profile.' };
+  }
+}
+
+export async function postCommentInFirebase(
+  user: PlayerProfile,
+  payload: { artworkId: string | null; parentId?: string | null; content: string }
+): Promise<{ ok: boolean; error?: string; comment?: CommunityComment }> {
+  const cleanContent = payload.content.replace(/[<>]/g, '').trim().slice(0, 500);
+  if (!cleanContent) {
+    return { ok: false, error: 'Comment cannot be empty.' };
+  }
+  const now = getEstimatedServerNow();
+  const commentId = `cmt_${now}_${user.id.slice(0, 5)}`;
+  const db = getFirebaseDb();
+  const record = {
+    id: commentId,
+    artworkId: payload.artworkId || null,
+    parentId: payload.parentId || null,
+    userId: user.id,
+    username: user.username.slice(0, 24),
+    avatarEmoji: user.avatarEmoji,
+    avatarColor: user.avatarColor,
+    content: cleanContent,
+    createdAt: serverTimestamp(),
+  };
+  try {
+    await set(ref(db, `comments/${commentId}`), record);
+    return {
+      ok: true,
+      comment: {
+        ...record,
+        likes: [],
+        reported: false,
+        reportReason: null,
+        hidden: false,
+        createdAt: now,
+      },
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Failed to post comment.' };
+  }
+}
+
+export async function reportCommentInFirebase(
+  user: PlayerProfile,
+  targetId: string,
+  reason: string
+): Promise<void> {
+  const cleanReason = reason.replace(/[<>]/g, '').trim().slice(0, 300);
+  if (cleanReason.length < 3) return;
+  const now = getEstimatedServerNow();
+  const reportId = `rep_${now}_${user.id.slice(0, 5)}`;
+  const db = getFirebaseDb();
+  await set(ref(db, `reports/${reportId}`), {
+    id: reportId,
+    targetId,
+    reporterId: user.id,
+    reason: cleanReason,
+    createdAt: serverTimestamp(),
+  }).catch(() => {});
+}
+
+export async function adminErasePixelsInFirebase(
+  adminUser: PlayerProfile | null,
+  coords: { x: number; y: number }[]
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can erase pixels.');
+  }
   try {
     const db = getFirebaseDb();
     const multiUpdates: Record<string, null> = {};
     for (const c of coords) {
       if (c.x >= 0 && c.x < 1000 && c.y >= 0 && c.y < 1000) {
         const chunkId = getChunkId(c.x, c.y);
-        multiUpdates[`canvas/chunks/${chunkId}/${c.x}_${c.y}`] = null;
         multiUpdates[`canvasChunks/${chunkId}/${c.x}_${c.y}`] = null;
       }
     }
@@ -462,11 +610,49 @@ export async function adminErasePixelsInFirebase(coords: { x: number; y: number 
       await update(ref(db), multiUpdates);
     }
   } catch {
-    // ignore if rules locked
+    // ignore if offline
   }
 }
 
-export async function adminDeleteUserInFirebase(userId: string): Promise<void> {
+export async function adminBatchPlacePixelsInFirebase(
+  adminUser: PlayerProfile | null,
+  pixels: GlobalPixel[]
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can batch place pixels.');
+  }
+  try {
+    const db = getFirebaseDb();
+    const multiUpdates: Record<string, any> = {};
+    for (const px of pixels) {
+      if (px.x >= 0 && px.x < 1000 && px.y >= 0 && px.y < 1000) {
+        const chunkId = getChunkId(px.x, px.y);
+        multiUpdates[`canvasChunks/${chunkId}/${px.x}_${px.y}`] = {
+          x: px.x,
+          y: px.y,
+          color: String(px.color || '#6B3DFF').toUpperCase(),
+          ownerId: adminUser.id,
+          ownerUsername: 'zero_sus',
+          version: Number(px.version || 1),
+          updatedAt: serverTimestamp(),
+        };
+      }
+    }
+    if (Object.keys(multiUpdates).length > 0) {
+      await update(ref(db), multiUpdates);
+    }
+  } catch {
+    // ignore if offline
+  }
+}
+
+export async function adminDeleteUserInFirebase(
+  adminUser: PlayerProfile | null,
+  userId: string
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can delete users.');
+  }
   try {
     const db = getFirebaseDb();
     await update(ref(db), {
@@ -479,7 +665,31 @@ export async function adminDeleteUserInFirebase(userId: string): Promise<void> {
   }
 }
 
-export async function adminDeleteArtworkInFirebase(artworkId: string): Promise<void> {
+export async function adminUpdateUserInFirebase(
+  adminUser: PlayerProfile | null,
+  targetUser: PlayerProfile
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can update users.');
+  }
+  try {
+    const db = getFirebaseDb();
+    await set(ref(db, `users/${targetUser.id}`), {
+      ...targetUser,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // ignore
+  }
+}
+
+export async function adminDeleteArtworkInFirebase(
+  adminUser: PlayerProfile | null,
+  artworkId: string
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can delete artworks.');
+  }
   try {
     const db = getFirebaseDb();
     await set(ref(db, `artworks/${artworkId}`), null);
@@ -488,10 +698,39 @@ export async function adminDeleteArtworkInFirebase(artworkId: string): Promise<v
   }
 }
 
-export async function adminDeleteCommentInFirebase(commentId: string): Promise<void> {
+export async function adminDeleteCommentInFirebase(
+  adminUser: PlayerProfile | null,
+  commentId: string
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can delete comments.');
+  }
   try {
     const db = getFirebaseDb();
     await set(ref(db, `comments/${commentId}`), null);
+  } catch {
+    // ignore
+  }
+}
+
+export async function adminBroadcastInFirebase(
+  adminUser: PlayerProfile | null,
+  title: string,
+  message: string
+): Promise<void> {
+  if (!isDeveloperAdmin(adminUser)) {
+    throw new Error('Unauthorized: Only @zero_sus can broadcast announcements.');
+  }
+  try {
+    const db = getFirebaseDb();
+    await set(ref(db, 'system/broadcast'), {
+      id: `bc_${Date.now()}`,
+      title: title.slice(0, 80),
+      message: message.slice(0, 300),
+      adminUid: adminUser.id,
+      senderUsername: 'zero_sus',
+      createdAt: serverTimestamp(),
+    });
   } catch {
     // ignore
   }

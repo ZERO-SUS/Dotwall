@@ -7,22 +7,25 @@ import {
   Edit3,
   Grid,
   Heart,
+  KeyRound,
   LogIn,
+  LogOut,
   MessageSquare,
   Sparkles,
   Trophy,
   UserCheck,
 } from 'lucide-react';
-import type {
-  AchievementItem,
-  CommunityArtwork,
-  CommunityComment,
-  PixelHistoryEntry,
-  PlayerProfile,
+import {
+  isDeveloperAdmin,
+  isReservedAdminHandle,
+  type AchievementItem,
+  type CommunityArtwork,
+  type CommunityComment,
+  type PixelHistoryEntry,
+  type PlayerProfile,
 } from '../types';
 import { AVATAR_COLORS, AVATAR_EMOJIS } from '../constants';
 import { PixelArtworkPreview } from './PixelArtworkPreview';
-import { exportSpritePng } from '../utils/exportPng';
 
 interface ProfileViewProps {
   currentUser: PlayerProfile | null;
@@ -41,7 +44,9 @@ interface ProfileViewProps {
     avatarEmoji: string;
     avatarColor: string;
   }) => Promise<{ ok: boolean; error?: string }>;
-  onSwitchAccount: (username: string) => Promise<{ ok: boolean; error?: string }>;
+  onOpenAuthModal: () => void;
+  onOpenChangePassword?: () => void;
+  onLogout?: () => Promise<void>;
   onOpenArtwork: (art: CommunityArtwork) => void;
 }
 
@@ -56,7 +61,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onClearInspectedUser,
   onInspectPlayer,
   onUpdateProfile,
-  onSwitchAccount,
+  onOpenAuthModal,
+  onOpenChangePassword,
+  onLogout,
   onOpenArtwork,
 }) => {
   // Determine which profile we are viewing
@@ -95,10 +102,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     null
   );
 
-  // Switch / Sign-in modal state
-  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [loginUsernameInput, setLoginUsernameInput] = useState<string>('');
-
   useEffect(() => {
     if (profileUser && isOwnProfile) {
       setEditUsername(profileUser.username);
@@ -133,6 +136,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveFeedback(null);
+
+    if (!isDeveloperAdmin(currentUser) && isReservedAdminHandle(editUsername)) {
+      setSaveFeedback({
+        text: 'That username is reserved and cannot be used.',
+        isError: true,
+      });
+      return;
+    }
+
     const res = await onUpdateProfile({
       username: editUsername,
       displayName: editDisplayName,
@@ -199,8 +211,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           </div>
         </div>
 
-        {isOwnProfile && (
-          <div className="profile-hero-actions">
+        {isOwnProfile ? (
+          <div className="profile-hero-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button
               type="button"
               className="btn primary"
@@ -208,15 +220,44 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             >
               <Edit3 size={15} /> {isEditing ? 'Close Editor' : 'Edit Profile'}
             </button>
+            {onOpenChangePassword && (
+              <button
+                type="button"
+                className="btn"
+                onClick={onOpenChangePassword}
+              >
+                <KeyRound size={15} /> Change Password
+              </button>
+            )}
             <button
               type="button"
               className="btn"
-              onClick={() => setShowAuthModal(true)}
+              onClick={onOpenAuthModal}
             >
-              <LogIn size={15} /> Switch / Sign In
+              <LogIn size={15} /> Switch Account
+            </button>
+            {onLogout && (
+              <button
+                type="button"
+                className="btn"
+                style={{ borderColor: 'rgba(235, 87, 87, 0.4)', color: '#FF6B6B' }}
+                onClick={onLogout}
+              >
+                <LogOut size={15} /> Log Out
+              </button>
+            )}
+          </div>
+        ) : !currentUser ? (
+          <div className="profile-hero-actions">
+            <button
+              type="button"
+              className="btn primary"
+              onClick={onOpenAuthModal}
+            >
+              <LogIn size={15} /> Sign In to Play
             </button>
           </div>
-        )}
+        ) : null}
       </div>
 
       {saveFeedback && (
@@ -476,83 +517,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           )}
         </div>
       </div>
-
-      {/* Switch Account / Sign In Modal */}
-      {showAuthModal && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setShowAuthModal(false)}
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="modal-card compact-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 className="modal-title">Sign In or Switch Player Account</h2>
-            </div>
-            <p className="empty-line" style={{ marginBottom: 12 }}>
-              Enter any new or existing username to sign in, or pick a demo player account to test
-              multi-user cooldowns and ownership rules:
-            </p>
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                if (!loginUsernameInput.trim()) return;
-                await onSwitchAccount(loginUsernameInput.trim());
-                setShowAuthModal(false);
-              }}
-            >
-              <div className="form-group">
-                <label className="form-label">Username</label>
-                <input
-                  type="text"
-                  className="text-input"
-                  placeholder="e.g. cyber_artist"
-                  value={loginUsernameInput}
-                  onChange={(e) => setLoginUsernameInput(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="modal-actions" style={{ marginTop: 14 }}>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => setShowAuthModal(false)}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="btn primary">
-                  Sign In / Create Account
-                </button>
-              </div>
-            </form>
-
-            <h3 style={{ marginTop: 18, font: '500 11px var(--font-mono)', color: 'var(--muted)' }}>
-              QUICK-SWITCH EXISTING PLAYERS:
-            </h3>
-            <div className="quick-users-list">
-              {users.slice(0, 6).map((u) => (
-                <button
-                  key={u.id}
-                  type="button"
-                  className="creator-chip"
-                  onClick={async () => {
-                    await onSwitchAccount(u.username);
-                    setShowAuthModal(false);
-                  }}
-                >
-                  <span
-                    className="creator-avatar-dot"
-                    style={{ backgroundColor: u.avatarColor }}
-                  >
-                    {u.avatarEmoji}
-                  </span>
-                  <span>@{u.username}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -16,6 +16,13 @@ const db = admin.database();
 
 const COOLDOWN_MS = 30000;
 const CHUNK_SIZE = 50;
+const VERIFIED_ADMIN_EMAILS = new Set(['zero_sus@dotwall.app', 'darshan99806@gmail.com']);
+
+function isVerifiedAdminToken(auth) {
+  if (!auth || !auth.token) return false;
+  const email = String(auth.token.email || '').toLowerCase();
+  return VERIFIED_ADMIN_EMAILS.has(email);
+}
 
 /**
  * 1. Trusted Pixel Placement & Replacement (Enforces 30s cooldown, coordinates, HEX, and XP)
@@ -26,6 +33,7 @@ exports.placePixelTrusted = onCall({ region: 'asia-southeast1' }, async (request
   }
 
   const uid = request.auth.uid;
+  const isAdmin = isVerifiedAdminToken(request.auth);
   const x = Number(request.data.x);
   const y = Number(request.data.y);
   const color = String(request.data.color || '').toUpperCase();
@@ -41,15 +49,15 @@ exports.placePixelTrusted = onCall({ region: 'asia-southeast1' }, async (request
   const now = Date.now();
   const cdRef = db.ref(`cooldowns/${uid}`);
 
-  // Atomic transaction on cooldowns/{uid}
+  // Atomic transaction on cooldowns/{uid} (0s cooldown for verified @zero_sus admin)
   const cdTx = await cdRef.transaction((current) => {
-    if (current && Number(current.nextCooldownAt || 0) > now) {
+    if (!isAdmin && current && Number(current.nextCooldownAt || 0) > now) {
       return; // Abort: still on cooldown
     }
     return {
       uid,
       lastPlacedAt: now,
-      nextCooldownAt: now + COOLDOWN_MS,
+      nextCooldownAt: isAdmin ? now : now + COOLDOWN_MS,
     };
   });
 
@@ -58,7 +66,12 @@ exports.placePixelTrusted = onCall({ region: 'asia-southeast1' }, async (request
   }
 
   const userSnap = await db.ref(`users/${uid}`).get();
-  const username = userSnap.exists() ? String(userSnap.val().username || 'player').slice(0, 24) : 'player';
+  const rawName = userSnap.exists() ? String(userSnap.val().username || 'player').slice(0, 24) : 'player';
+  const username = isAdmin
+    ? 'zero_sus'
+    : rawName.toLowerCase() === 'zero_sus'
+      ? `player_${uid.slice(0, 5)}`
+      : rawName;
 
   const chunkId = `${Math.floor(x / CHUNK_SIZE)}_${Math.floor(y / CHUNK_SIZE)}`;
   const pixelKey = `${x}_${y}`;

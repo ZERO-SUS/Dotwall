@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   Download,
   Eraser,
+  Lock,
   Megaphone,
   MessageSquare,
   Paintbrush,
@@ -35,7 +36,6 @@ interface AdminPanelViewProps {
   artworks: CommunityArtwork[];
   comments: CommunityComment[];
   stats: GlobalStats;
-  onLoginAsAdmin: () => Promise<void>;
   onAdminErasePixels: (coords: { x: number; y: number }[]) => Promise<{ ok: boolean; count?: number }>;
   onAdminBatchPlacePixels: (
     coords: { x: number; y: number }[],
@@ -67,7 +67,6 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   artworks,
   comments,
   stats,
-  onLoginAsAdmin,
   onAdminErasePixels,
   onAdminBatchPlacePixels,
   onAdminDeleteUser,
@@ -262,6 +261,83 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     showToast('👑 Exported full Dotwall JSON database backup!');
   };
 
+  const ADMIN_SECURITY_PASSKEY = '9945069081SUSzero';
+  const [isPasskeyUnlocked, setIsPasskeyUnlocked] = useState<boolean>(() => {
+    return window.sessionStorage.getItem('dotwall_admin_passkey_unlocked') === 'true';
+  });
+  const [passkeyInput, setPasskeyInput] = useState<string>('');
+  const [passkeyError, setPasskeyError] = useState<string | null>(null);
+
+  const handleUnlockPasskey = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (passkeyInput.trim() === ADMIN_SECURITY_PASSKEY) {
+      window.sessionStorage.setItem('dotwall_admin_passkey_unlocked', 'true');
+      setIsPasskeyUnlocked(true);
+      setPasskeyError(null);
+      showToast('👑 Master Admin Console Unlocked!');
+    } else {
+      setPasskeyError('Incorrect Master Admin Passkey. Access Denied.');
+    }
+  };
+
+  const handleLockAdminPanel = () => {
+    window.sessionStorage.removeItem('dotwall_admin_passkey_unlocked');
+    setIsPasskeyUnlocked(false);
+    setPasskeyInput('');
+    setPasskeyError(null);
+  };
+
+  if (!isAdmin) {
+    return null;
+  }
+
+  if (!isPasskeyUnlocked) {
+    return (
+      <main className="view-section" aria-label="Developer Admin Passkey Challenge">
+        <div
+          className="card compact-modal"
+          style={{ maxWidth: 440, margin: '60px auto', border: '2px solid var(--accent)' }}
+        >
+          <div style={{ textAlign: 'center', marginBottom: 18 }}>
+            <span className="genz-pill daily">👑 DEVELOPER GOD-MODE GATE</span>
+            <h2 style={{ marginTop: 8, marginBottom: 4 }}>Admin Passkey Required</h2>
+            <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
+              Session authenticated as <b>@{currentUser.username}</b>. Enter the master administrator passkey to unlock god-mode moderation controls.
+            </p>
+          </div>
+
+          <form onSubmit={handleUnlockPasskey}>
+            <div className="form-group" style={{ marginBottom: 14 }}>
+              <label className="form-label">Master Admin Passkey</label>
+              <input
+                type="password"
+                className="text-input"
+                placeholder="Enter admin passkey..."
+                value={passkeyInput}
+                onChange={(e) => {
+                  setPasskeyInput(e.target.value);
+                  setPasskeyError(null);
+                }}
+                autoFocus
+                required
+              />
+            </div>
+
+            {passkeyError && (
+              <p className="msg" data-kind="error" style={{ marginBottom: 12 }}>
+                {passkeyError}
+              </p>
+            )}
+
+            <button type="submit" className="go" style={{ width: '100%', justifyContent: 'center' }}>
+              <ShieldCheck size={15} /> Unlock Admin Command Center
+            </button>
+          </form>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="view-section" aria-label="Developer and Admin Control Center">
       {/* Top Developer Identity Header */}
@@ -294,27 +370,23 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           </div>
 
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            {!isAdmin ? (
-              <button
-                type="button"
-                className="btn primary"
-                onClick={async () => {
-                  await onLoginAsAdmin();
-                  showToast('👑 Signed in as Developer Admin @zero_sus (UID: zero_sus)!');
-                }}
-              >
-                <ShieldCheck size={16} /> 👑 Login as @zero_sus (Admin ID)
-              </button>
-            ) : (
-              <span
-                className="genz-pill accent"
-                style={{ padding: '8px 14px', fontSize: 13, fontWeight: 700 }}
-              >
-                ✅ Active Admin Session: @{currentUser?.username} (UID: {currentUser?.id})
-              </span>
-            )}
+            <span
+              className="genz-pill accent"
+              style={{ padding: '8px 14px', fontSize: 13, fontWeight: 700 }}
+            >
+              ✅ Active Admin Session: @{currentUser?.username} (UID: {currentUser?.id})
+            </span>
             <button type="button" className="btn" onClick={onJumpToCanvas}>
               <Paintbrush size={15} /> Open Canvas with Erase Tool
+            </button>
+            <button
+              type="button"
+              className="btn"
+              style={{ borderColor: 'rgba(235, 87, 87, 0.4)', color: '#FF6B6B' }}
+              onClick={handleLockAdminPanel}
+              title="Lock Admin Control Center"
+            >
+              <Lock size={15} /> Lock Console
             </button>
           </div>
         </div>

@@ -287,17 +287,19 @@ export function dotwallMultiplayerPlugin(): Plugin {
           const body = await parseJsonBody(req);
           const requestedId = sanitizeText(body.userId, 64);
           let rawUsername = sanitizeText(body.username, 24).replace(/[^a-zA-Z0-9_.-]/g, '');
-          if (rawUsername.length < 2) {
+          if (
+            rawUsername.length < 2 ||
+            rawUsername.toLowerCase() === 'zero_sus' ||
+            rawUsername.toLowerCase() === 'zerosus'
+          ) {
             rawUsername = `pixel_${Math.floor(1000 + Math.random() * 9000)}`;
           }
 
-          // Check if switching to an existing username or userId
-          let existingUser = requestedId ? (db.users as Record<string, any>)[requestedId] : undefined;
-          if (!existingUser && body.loginByUsername) {
-            existingUser = Object.values(db.users).find(
-              (u: any) => u.username.toLowerCase() === rawUsername.toLowerCase()
-            );
-          }
+          // Only look up by explicit userId (never allow unauthenticated loginByUsername hijacking)
+          let existingUser =
+            requestedId && requestedId.toLowerCase() !== 'zero_sus'
+              ? (db.users as Record<string, any>)[requestedId]
+              : undefined;
 
           if (!existingUser) {
             // Ensure unique username
@@ -307,7 +309,10 @@ export function dotwallMultiplayerPlugin(): Plugin {
             if (taken) {
               rawUsername = `${rawUsername}_${Math.floor(10 + Math.random() * 89)}`;
             }
-            const newId = requestedId || `usr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+            const newId =
+              requestedId && requestedId.toLowerCase() !== 'zero_sus'
+                ? requestedId
+                : `usr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
             existingUser = {
               id: newId,
               username: rawUsername,
@@ -348,6 +353,15 @@ export function dotwallMultiplayerPlugin(): Plugin {
             const cleanName = sanitizeText(body.username, 24).replace(/[^a-zA-Z0-9_.-]/g, '');
             if (cleanName.length < 2) {
               return sendJson(res, 400, { ok: false, error: 'Username must be at least 2 characters.' });
+            }
+            if (
+              !user.isAdmin &&
+              (cleanName.toLowerCase() === 'zero_sus' || cleanName.toLowerCase() === 'zerosus')
+            ) {
+              return sendJson(res, 403, {
+                ok: false,
+                error: 'Username "@zero_sus" is strictly reserved for the developer admin.',
+              });
             }
             const conflict = Object.values(db.users).find(
               (u: any) => u.id !== user.id && u.username.toLowerCase() === cleanName.toLowerCase()

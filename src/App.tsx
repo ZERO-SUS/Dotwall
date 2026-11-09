@@ -5,6 +5,7 @@ import {
   Grid,
   Home,
   LogIn,
+  LogOut,
   MessageSquare,
   Moon,
   Paintbrush,
@@ -26,42 +27,53 @@ import {
   GlobalPixel,
   GlobalStats,
   isDeveloperAdmin,
+  isReservedAdminHandle,
   NavTab,
   PixelHistoryEntry,
   PixelTask,
   PlayerProfile,
+  RESERVED_ADMIN_USERNAME,
   TaskPixel,
   TaskSubmission,
 } from './types';
 import { COOLDOWN_SECONDS, GLOBAL_CAPACITY } from './constants';
 import { getFirebaseAuth, getFirebaseDb } from './firebase/app';
 import {
+  changeUserPassword,
   ensurePlayerProfileInDb,
   formatFirebaseAuthError,
+  isVerifiedFirebaseAdminUser,
   loginWithEmail,
   loginWithGooglePopup,
   logoutFirebaseUser,
   onAuthStateChanged,
   registerWithEmail,
+  sanitizePublicUsername,
   sendAccountPasswordReset,
 } from './firebase/auth';
 import { startUserPresenceSession, subscribeToOnlinePlayers } from './firebase/presence';
 import {
+  adminBatchPlacePixelsInFirebase,
+  adminBroadcastInFirebase,
   adminDeleteArtworkInFirebase,
   adminDeleteCommentInFirebase,
   adminDeleteUserInFirebase,
   adminErasePixelsInFirebase,
+  adminUpdateUserInFirebase,
+  getEstimatedServerNow,
+  limitToLast,
+  onValue,
   placePixelInFirebase,
+  postCommentInFirebase,
+  query,
+  ref,
+  reportCommentInFirebase,
   submitTaskInFirebase,
+  subscribeToServerTimeOffset,
   undoLastPlacementInFirebase,
+  updateProfileInFirebase,
 } from './firebase/database';
-import {
-  publishGlobalRelayEvent,
-  startGlobalRelayPresence,
-  subscribeToGlobalRelayStream,
-} from './firebase/globalRelay';
 import { initDotwallAnalytics, trackGameEvent } from './firebase/analytics';
-import { onValue, ref } from 'firebase/database';
 import {
   ACHIEVEMENTS_CATALOG,
   createInitialDatabaseSeed,
@@ -136,6 +148,7 @@ export function App() {
     'connecting'
   );
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+  const [authModalTab, setAuthModalTab] = useState<'login' | 'signup' | 'reset' | 'change'>('login');
 
   // Core Game State
   const [pixelsMap, setPixelsMap] = useState<Map<string, GlobalPixel>>(new Map());
@@ -321,36 +334,23 @@ export function App() {
       }
     });
 
-    const usersList = (Object.values(seed.users) as PlayerProfile[]).filter(
-      (u) =>
-        !BANNED_BOT_IDS.has((u.id || '').toLowerCase()) &&
-        !BANNED_BOT_IDS.has((u.username || '').toLowerCase())
-    );
-    if (!usersList.some((u) => u.id === 'zero_sus' || u.username === 'zero_sus')) {
-      const adminSeed: PlayerProfile = {
-        id: 'zero_sus',
-        username: 'zero_sus',
-        displayName: 'ZERO_SUS · Lead Developer & Admin',
-        avatarEmoji: '👑',
-        avatarColor: '#6B3DFF',
-        bio: 'Creator & Lead Developer of Dotwall 1000×1000.',
-        pixelsPlaced: 0,
-        tasksCompleted: 0,
-        points: 9999,
-        lastPixelAt: 0,
-        nextCooldownAt: 0,
-        joinedAt: Date.now(),
-        achievements: [],
-        isAdmin: true,
-      };
-      usersList.unshift(adminSeed);
-      seed.users.zero_sus = adminSeed;
+    const usersList = (Object.values(seed.users) as PlayerProfile[])
+      .filter(
+        (u) =>
+          !BANNED_BOT_IDS.has((u.id || '').toLowerCase()) &&
+          !BANNED_BOT_IDS.has((u.username || '').toLowerCase()) &&
+          (u.id || '').toLowerCase() !== RESERVED_ADMIN_USERNAME &&
+          !isReservedAdminHandle(u.username)
+      )
+      .map((u) => ({ ...u, isAdmin: false }));
+
+    let savedUserId = window.localStorage.getItem(USER_ID_STORAGE_KEY);
+    if (savedUserId && savedUserId.toLowerCase() === RESERVED_ADMIN_USERNAME) {
+      window.localStorage.removeItem(USER_ID_STORAGE_KEY);
+      savedUserId = null;
     }
 
-    const savedUserId = window.localStorage.getItem(USER_ID_STORAGE_KEY);
-    let me =
-      usersList.find((u) => u.id === savedUserId || (savedUserId === 'zero_sus' && u.username === 'zero_sus')) ||
-      null;
+    let me = usersList.find((u) => u.id === savedUserId) || null;
     if (!me) {
       me = {
         id: `usr-${Date.now().toString(36)}`,
@@ -366,6 +366,7 @@ export function App() {
         nextCooldownAt: 0,
         joinedAt: Date.now(),
         achievements: [],
+        isAdmin: false,
       };
       usersList.push(me);
       seed.users[me.id] = me;
@@ -460,6 +461,14 @@ export function App() {
     initializeMultiplayer();
   }, []);
 
+  // Subscribe to Firebase Server Time Offset for accurate 30s cooldown validation
+  useEffect(() => {
+    const unsubOffset = subscribeToServerTimeOffset((offsetMs) => {
+      setServerTimeOffsetMs(offsetMs);
+    });
+    return () => unsubOffset();
+  }, []);
+
   // Subscribe to Firebase Authentication (dotwall-13046) session persistence
   useEffect(() => {
     const auth = getFirebaseAuth();
@@ -494,10 +503,7 @@ export function App() {
         }
         return;
       }
-      // Preserve explicit Developer Admin session (`zero_sus`) if active
-      if (window.localStorage.getItem(USER_ID_STORAGE_KEY) === 'zero_sus') {
-        return;
-      }
+
       try {
         const profile = await ensurePlayerProfileInDb(fbUser);
         window.localStorage.setItem(USER_ID_STORAGE_KEY, profile.id);
@@ -507,22 +513,21 @@ export function App() {
           return exists ? prev.map((u) => (u.id === profile.id ? profile : u)) : [...prev, profile];
         });
       } catch {
-        // Fallback profile directly from Firebase Auth user
-        const cleanHandle = (
-          fbUser.displayName ||
-          fbUser.email?.split('@')[0] ||
-          `pixel_${fbUser.uid.slice(0, 6)}`
-        )
-          .replace(/^@/, '')
-          .replace(/[^a-zA-Z0-9_.-]/g, '')
-          .slice(0, 24);
+        const verifiedAdmin = isVerifiedFirebaseAdminUser(fbUser);
+        const cleanHandle = verifiedAdmin
+          ? RESERVED_ADMIN_USERNAME
+          : sanitizePublicUsername(fbUser.displayName || fbUser.email?.split('@')[0], fbUser.uid);
         const fallbackProfile: PlayerProfile = {
           id: fbUser.uid,
           username: cleanHandle,
-          displayName: fbUser.displayName || cleanHandle,
-          avatarEmoji: '👾',
+          displayName: verifiedAdmin
+            ? 'ZERO_SUS · Lead Developer & Admin'
+            : fbUser.displayName || cleanHandle,
+          avatarEmoji: verifiedAdmin ? '👑' : '👾',
           avatarColor: '#6B3DFF',
-          bio: 'Verified Firebase Player on Dotwall 1000×1000.',
+          bio: verifiedAdmin
+            ? 'Creator & Lead Developer of Dotwall 1000×1000.'
+            : 'Verified Firebase Player on Dotwall 1000×1000.',
           pixelsPlaced: 0,
           tasksCompleted: 0,
           points: 50,
@@ -530,9 +535,10 @@ export function App() {
           nextCooldownAt: 0,
           joinedAt: Date.now(),
           achievements: [],
+          ...(verifiedAdmin ? { isAdmin: true } : {}),
         };
         window.localStorage.setItem(USER_ID_STORAGE_KEY, fallbackProfile.id);
-        setCurrentUser((prev) => (prev && prev.id === fbUser.uid ? prev : fallbackProfile));
+        setCurrentUser(fallbackProfile);
         setUsers((prev) =>
           prev.some((u) => u.id === fallbackProfile.id) ? prev : [...prev, fallbackProfile]
         );
@@ -547,6 +553,14 @@ export function App() {
     const unsubscribes: (() => void)[] = [];
 
     for (const chunkId of visibleChunkIds.slice(0, 36)) {
+      const [cxStr, cyStr] = chunkId.split('_');
+      const cx = Number(cxStr);
+      const cy = Number(cyStr);
+      const minX = cx * 50;
+      const maxX = minX + 49;
+      const minY = cy * 50;
+      const maxY = minY + 49;
+
       const chunkRef = ref(db, `canvasChunks/${chunkId}`);
       const unsub = onValue(
         chunkRef,
@@ -555,9 +569,16 @@ export function App() {
           setConnectionMode('firebase-cloud');
           setConnectionState('live');
           const val = snapshot.val();
-          if (val && typeof val === 'object') {
-            setPixelsMap((prev) => {
-              const next = new Map(prev);
+          setPixelsMap((prev) => {
+            const next = new Map(prev);
+            if (Number.isInteger(cx) && Number.isInteger(cy)) {
+              for (const [key, px] of next.entries()) {
+                if (px.x >= minX && px.x <= maxX && px.y >= minY && px.y <= maxY) {
+                  next.delete(key);
+                }
+              }
+            }
+            if (val && typeof val === 'object') {
               Object.values(val as Record<string, any>).forEach((cell) => {
                 if (cell && typeof cell.x === 'number' && typeof cell.y === 'number') {
                   next.set(`${cell.x},${cell.y}`, {
@@ -571,12 +592,15 @@ export function App() {
                   });
                 }
               });
-              return next;
-            });
-          }
+            }
+            return next;
+          });
         },
         (err) => {
-          if (err?.message?.toLowerCase().includes('permission_denied') || err?.message?.toLowerCase().includes('permission denied')) {
+          if (
+            err?.message?.toLowerCase().includes('permission_denied') ||
+            err?.message?.toLowerCase().includes('permission denied')
+          ) {
             setRtdbStatus('permission-denied');
           }
         }
@@ -589,7 +613,134 @@ export function App() {
     };
   }, [visibleChunkIds]);
 
-  // Subscribe to Firebase Realtime Presence + Global Cross-Device WebSocket Presence
+  // Subscribe to authoritative Firebase Realtime Database collections (`users`, `placements`, `artworks`, `comments`, `taskSubmissions`, `system/broadcast`)
+  useEffect(() => {
+    const db = getFirebaseDb();
+    let lastBroadcastId = '';
+
+    const unsubUsers = onValue(
+      query(ref(db, 'users'), limitToLast(200)),
+      (snap) => {
+        const val = snap.val();
+        if (!val || typeof val !== 'object') return;
+        const list = Object.values(val as Record<string, PlayerProfile>).filter(
+          (u) =>
+            u &&
+            u.id &&
+            !BANNED_BOT_IDS.has(u.id.toLowerCase()) &&
+            !BANNED_BOT_IDS.has((u.username || '').toLowerCase())
+        );
+        if (list.length > 0) {
+          setUsers(list);
+          setCurrentUser((me) => {
+            if (!me) return me;
+            const fresh = list.find((u) => u.id === me.id);
+            return fresh ? { ...fresh, isAdmin: me.isAdmin } : me;
+          });
+        }
+      },
+      () => {}
+    );
+
+    const unsubPlacements = onValue(
+      query(ref(db, 'placements'), limitToLast(150)),
+      (snap) => {
+        const val = snap.val();
+        if (!val || typeof val !== 'object') return;
+        const list = Object.values(val as Record<string, PixelHistoryEntry>)
+          .filter((h) => h && typeof h.x === 'number' && typeof h.y === 'number')
+          .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+        if (list.length > 0) {
+          setHistory(list);
+        }
+      },
+      () => {}
+    );
+
+    const unsubArtworks = onValue(
+      query(ref(db, 'artworks'), limitToLast(100)),
+      (snap) => {
+        const val = snap.val();
+        if (!val || typeof val !== 'object') {
+          setArtworks([]);
+          return;
+        }
+        const list = Object.values(val as Record<string, CommunityArtwork>)
+          .filter((a) => a && a.id && Array.isArray(a.pixels))
+          .map((a) => ({
+            ...a,
+            likes: Array.isArray(a.likes) ? a.likes : [],
+            commentsCount: Number(a.commentsCount || 0),
+          }))
+          .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+        setArtworks(list);
+      },
+      () => {}
+    );
+
+    const unsubComments = onValue(
+      query(ref(db, 'comments'), limitToLast(150)),
+      (snap) => {
+        const val = snap.val();
+        if (!val || typeof val !== 'object') {
+          setComments([]);
+          return;
+        }
+        const list = Object.values(val as Record<string, CommunityComment>)
+          .filter((c) => c && c.id && c.content)
+          .map((c) => ({
+            ...c,
+            likes: Array.isArray(c.likes) ? c.likes : [],
+            reported: Boolean(c.reported),
+            reportReason: c.reportReason || null,
+            hidden: Boolean(c.hidden),
+          }))
+          .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+        setComments(list);
+      },
+      () => {}
+    );
+
+    const unsubSubmissions = onValue(
+      query(ref(db, 'taskSubmissions'), limitToLast(100)),
+      (snap) => {
+        const val = snap.val();
+        if (!val || typeof val !== 'object') return;
+        const list = Object.values(val as Record<string, TaskSubmission>)
+          .filter((s) => s && s.id && s.taskId)
+          .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+        if (list.length > 0) {
+          setTaskSubmissions(list);
+        }
+      },
+      () => {}
+    );
+
+    const unsubBroadcast = onValue(
+      ref(db, 'system/broadcast'),
+      (snap) => {
+        const val = snap.val();
+        if (val && val.id && val.message && val.id !== lastBroadcastId) {
+          if (lastBroadcastId !== '') {
+            pushNotification(val.title || '👑 Admin Announcement (@zero_sus)', val.message, '👑');
+          }
+          lastBroadcastId = val.id;
+        }
+      },
+      () => {}
+    );
+
+    return () => {
+      unsubUsers();
+      unsubPlacements();
+      unsubArtworks();
+      unsubComments();
+      unsubSubmissions();
+      unsubBroadcast();
+    };
+  }, [pushNotification]);
+
+  // Subscribe to Firebase Realtime Presence (UID-deduplicated)
   useEffect(() => {
     if (!currentUser) return;
     const stopPresence = startUserPresenceSession(currentUser, activeTab);
@@ -602,169 +753,11 @@ export function App() {
         }));
       }
     });
-    const stopRelayPresence = startGlobalRelayPresence(
-      currentUser,
-      activeTab,
-      (relayOnlineList) => {
-        if (relayOnlineList.length > 0) {
-          setStats((prev) => {
-            const merged = new Map<string, any>();
-            for (const p of prev.onlinePlayers || []) merged.set(p.userId, p);
-            for (const p of relayOnlineList) merged.set(p.userId, p);
-            const list = Array.from(merged.values());
-            return {
-              ...prev,
-              onlinePlayersCount: Math.max(1, list.length),
-              onlinePlayers: list,
-            };
-          });
-        }
-      }
-    );
     return () => {
       stopPresence();
       stopOnlineListener();
-      stopRelayPresence();
     };
   }, [currentUser?.id, currentUser?.username, activeTab]);
-
-  // Global Real-Time Cloud Relay (Syncs pixels, undos, artworks, and comments across all devices/browsers worldwide in <150ms)
-  useEffect(() => {
-    const unsubRelay = subscribeToGlobalRelayStream({
-      onConnectionState: (connected) => {
-        if (connected) setConnectionState('live');
-      },
-      onPixelPlaced: (pixel, historyEntry) => {
-        setPixelsMap((prev) => {
-          const next = new Map(prev);
-          const existing = next.get(`${pixel.x},${pixel.y}`);
-          if (existing && existing.updatedAt && pixel.updatedAt && existing.updatedAt > pixel.updatedAt) {
-            return prev;
-          }
-          next.set(`${pixel.x},${pixel.y}`, pixel);
-          return next;
-        });
-        if (historyEntry) {
-          setHistory((prev) =>
-            prev.some((h) => h.id === historyEntry.id)
-              ? prev
-              : [...prev.slice(-199), historyEntry]
-          );
-        }
-      },
-      onPixelUndone: (x, y, restoredPixel, historyId) => {
-        setPixelsMap((prev) => {
-          const next = new Map(prev);
-          if (restoredPixel) {
-            next.set(`${x},${y}`, restoredPixel);
-          } else {
-            next.delete(`${x},${y}`);
-          }
-          return next;
-        });
-        if (historyId) {
-          setHistory((prev) =>
-            prev.map((h) => (h.id === historyId ? { ...h, undone: true } : h))
-          );
-        }
-      },
-      onArtworkPublished: (artwork) => {
-        setArtworks((prev) =>
-          prev.some((a) => a.id === artwork.id) ? prev : [artwork, ...prev]
-        );
-      },
-      onArtworkDeleted: (artworkId) => {
-        setArtworks((prev) => prev.filter((a) => a.id !== artworkId));
-      },
-      onCommentPosted: (comment) => {
-        setComments((prev) =>
-          prev.some((c) => c.id === comment.id) ? prev : [...prev, comment]
-        );
-      },
-      onCommentDeleted: (commentId) => {
-        setComments((prev) => prev.filter((c) => c.id !== commentId));
-      },
-      onPixelsErased: (coords) => {
-        setPixelsMap((prev) => {
-          const next = new Map(prev);
-          for (const c of coords) {
-            next.delete(`${c.x},${c.y}`);
-          }
-          return next;
-        });
-      },
-      onPixelsBatchPlaced: (pixels) => {
-        setPixelsMap((prev) => {
-          const next = new Map(prev);
-          for (const px of pixels) {
-            next.set(`${px.x},${px.y}`, px);
-          }
-          return next;
-        });
-      },
-      onUserDeleted: (userId, username, wipeContent) => {
-        const cleanId = (userId || '').toLowerCase();
-        const cleanName = (username || '').toLowerCase().replace(/^@/, '');
-        setUsers((prev) =>
-          prev.filter(
-            (u) =>
-              u.id.toLowerCase() !== cleanId && u.username.toLowerCase() !== cleanName
-          )
-        );
-        if (wipeContent) {
-          setPixelsMap((prev) => {
-            const next = new Map(prev);
-            for (const [k, px] of next.entries()) {
-              if (
-                (px.ownerId || '').toLowerCase() === cleanId ||
-                (px.ownerUsername || '').toLowerCase() === cleanName
-              ) {
-                next.delete(k);
-              }
-            }
-            return next;
-          });
-          setArtworks((prev) =>
-            prev.filter(
-              (a) =>
-                a.creatorId.toLowerCase() !== cleanId &&
-                a.creatorUsername.toLowerCase() !== cleanName
-            )
-          );
-          setComments((prev) =>
-            prev.filter(
-              (c) =>
-                c.userId.toLowerCase() !== cleanId && c.username.toLowerCase() !== cleanName
-            )
-          );
-        }
-      },
-      onUserUpdated: (user) => {
-        setUsers((prev) =>
-          prev.some((u) => u.id === user.id)
-            ? prev.map((u) => (u.id === user.id ? user : u))
-            : [...prev, user]
-        );
-        setCurrentUser((me) => (me && me.id === user.id ? user : me));
-      },
-      onCanvasCleared: (mode) => {
-        if (mode === 'empty') {
-          setPixelsMap(new Map());
-        } else {
-          const seed = createInitialDatabaseSeed();
-          const map = new Map<string, GlobalPixel>();
-          Object.values(seed.pixels as Record<string, GlobalPixel>).forEach((px) => {
-            map.set(`${px.x},${px.y}`, px);
-          });
-          setPixelsMap(map);
-        }
-      },
-      onAdminBroadcast: (title, message) => {
-        pushNotification(title, message, '👑');
-      },
-    });
-    return () => unsubRelay();
-  }, [pushNotification]);
 
   // Multi-tab BroadcastChannel sync for instant cross-tab updates
   useEffect(() => {
@@ -921,7 +914,7 @@ export function App() {
         return { ok: false, error: 'Please sign in to place pixels.' };
       }
 
-      const now = Date.now();
+      const now = getEstimatedServerNow();
       const userIsAdmin = isDeveloperAdmin(currentUser);
       if (!userIsAdmin && currentUser.nextCooldownAt && now < currentUser.nextCooldownAt) {
         const waitSec = Math.ceil((currentUser.nextCooldownAt - now) / 1000);
@@ -937,7 +930,7 @@ export function App() {
             y,
             color,
           });
-          if (fbRes.ok && fbRes.pixel && fbRes.historyEntry && fbRes.nextCooldownAt) {
+          if (fbRes.ok && fbRes.pixel && fbRes.historyEntry && fbRes.nextCooldownAt !== undefined) {
             const nextUser: PlayerProfile = {
               ...currentUser,
               pixelsPlaced: (currentUser.pixelsPlaced || 0) + 1,
@@ -956,11 +949,6 @@ export function App() {
             setHistory((prev) => [...prev.slice(-199), fbRes.historyEntry!]);
             setCurrentUser(nextUser);
             setUsers((prev) => prev.map((u) => (u.id === nextUser.id ? nextUser : u)));
-            publishGlobalRelayEvent({
-              type: 'pixel_placed',
-              pixel: fbRes.pixel!,
-              historyEntry: fbRes.historyEntry!,
-            });
             trackGameEvent('pixel_placed', {
               x,
               y,
@@ -994,13 +982,6 @@ export function App() {
           if (!data.ok) return { ok: false, error: data.error };
           if (data.user) setCurrentUser(data.user);
           if (data.stats) setStats(data.stats);
-          if (data.pixel && data.historyEntry) {
-            publishGlobalRelayEvent({
-              type: 'pixel_placed',
-              pixel: data.pixel,
-              historyEntry: data.historyEntry,
-            });
-          }
           trackGameEvent('pixel_placed', { x, y });
           return { ok: true };
         } catch {
@@ -1074,12 +1055,6 @@ export function App() {
       setUsers((prev) => prev.map((u) => (u.id === nextUser.id ? nextUser : u)));
 
       broadcastChannelRef.current?.postMessage({
-        type: 'pixel_placed',
-        pixel: updatedPixel,
-        historyEntry: histEntry,
-      });
-
-      publishGlobalRelayEvent({
         type: 'pixel_placed',
         pixel: updatedPixel,
         historyEntry: histEntry,
@@ -1194,14 +1169,6 @@ export function App() {
       x: entry.x,
       y: entry.y,
       restoredPixel,
-    });
-
-    publishGlobalRelayEvent({
-      type: 'pixel_undone',
-      x: entry.x,
-      y: entry.y,
-      restoredPixel,
-      historyId: entry.id,
     });
 
     return { ok: true, x: entry.x, y: entry.y };
@@ -1325,10 +1292,6 @@ export function App() {
           createdAt: now,
         };
         setArtworks((prev) => [newArt, ...prev]);
-        publishGlobalRelayEvent({
-          type: 'artwork_published',
-          artwork: newArt,
-        });
       }
 
       const nextUser: PlayerProfile = {
@@ -1392,6 +1355,25 @@ export function App() {
         setShowAuthModal(true);
         return { ok: false, error: 'Sign in required.' };
       }
+
+      if (rtdbStatus === 'connected') {
+        try {
+          const fbRes = await postCommentInFirebase(currentUser, {
+            artworkId: payload.artworkId,
+            parentId: payload.parentId || null,
+            content: payload.content,
+          });
+          if (fbRes.ok && fbRes.comment) {
+            setComments((prev) =>
+              prev.some((c) => c.id === fbRes.comment!.id) ? prev : [...prev, fbRes.comment!]
+            );
+            return { ok: true };
+          }
+        } catch {
+          // fallback
+        }
+      }
+
       if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/comments/create', {
@@ -1426,17 +1408,16 @@ export function App() {
         createdAt: Date.now(),
       };
       setComments((prev) => [...prev, newCmt]);
-      publishGlobalRelayEvent({
-        type: 'comment_posted',
-        comment: newCmt,
-      });
       return { ok: true };
     },
-    [currentUser, connectionMode]
+    [currentUser, rtdbStatus, connectionMode]
   );
 
   const handleReportComment = useCallback(
     async (commentId: string, reason: string, hideImmediately = false) => {
+      if (rtdbStatus === 'connected' && currentUser) {
+        reportCommentInFirebase(currentUser, commentId, reason).catch(() => {});
+      }
       if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         fetch('/api/comments/report', {
           method: 'POST',
@@ -1454,7 +1435,7 @@ export function App() {
         );
       }
     },
-    [connectionMode]
+    [rtdbStatus, currentUser, connectionMode]
   );
 
   const handleUpdateProfile = useCallback(
@@ -1466,6 +1447,24 @@ export function App() {
       avatarColor: string;
     }) => {
       if (!currentUser) return { ok: false, error: 'Not signed in.' };
+      if (!isDeveloperAdmin(currentUser) && isReservedAdminHandle(payload.username)) {
+        return {
+          ok: false,
+          error: 'Username "@zero_sus" is strictly reserved for the verified developer admin.',
+        };
+      }
+
+      if (rtdbStatus === 'connected') {
+        try {
+          const fbRes = await updateProfileInFirebase(currentUser, payload);
+          if (!fbRes.ok && fbRes.error) {
+            return { ok: false, error: fbRes.error };
+          }
+        } catch {
+          // fallback
+        }
+      }
+
       if (connectionMode === 'local-server' && isLocalhostRuntime()) {
         try {
           const res = await fetch('/api/profile', {
@@ -1491,172 +1490,84 @@ export function App() {
       setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
       return { ok: true };
     },
-    [currentUser, connectionMode]
+    [currentUser, rtdbStatus, connectionMode]
   );
 
-  // Full Login / Sign Up / Developer Admin Handler (Firebase Auth `dotwall-13046` + Profile Sync)
+  // Full Login / Sign Up Handler (Verified Firebase Auth `dotwall-13046` + Profile Sync)
   const handleAuthAction = useCallback(
     async (payload: {
-      mode: 'login' | 'signup' | 'admin';
+      mode: 'login' | 'signup';
       email?: string;
       username: string;
       password?: string;
       avatarEmoji?: string;
       avatarColor?: string;
     }) => {
-      const requestedHandle = (payload.username || payload.email?.split('@')[0] || '')
-        .replace(/^@/, '')
-        .trim()
-        .toLowerCase();
-
-      if (payload.mode === 'admin' || requestedHandle === 'zero_sus') {
-        const existingAdmin = users.find(
-          (u) => u.id.toLowerCase() === 'zero_sus' || u.username.toLowerCase() === 'zero_sus'
-        );
-        const adminProfile: PlayerProfile = {
-          id: 'zero_sus',
-          username: 'zero_sus',
-          displayName: 'ZERO_SUS · Lead Developer & Admin',
-          avatarEmoji: '👑',
-          avatarColor: '#6B3DFF',
-          bio: 'Creator & Lead Developer of Dotwall 1000×1000. Full Admin & God-Mode Control.',
-          pixelsPlaced: existingAdmin?.pixelsPlaced ?? 500,
-          tasksCompleted: existingAdmin?.tasksCompleted ?? 10,
-          points: existingAdmin?.points ?? 9999,
-          lastPixelAt: 0,
-          nextCooldownAt: 0,
-          joinedAt: existingAdmin?.joinedAt ?? Date.now() - 86400000 * 30,
-          achievements: ACHIEVEMENTS_CATALOG.map((a) => a.id),
-          isAdmin: true,
+      if (!payload.password || payload.password.length < 6) {
+        return {
+          ok: false,
+          error: 'A valid password (at least 6 characters) is required.',
         };
-        window.localStorage.setItem(USER_ID_STORAGE_KEY, 'zero_sus');
-        setCurrentUser(adminProfile);
-        setUsers((prev) =>
-          prev.some((u) => u.id === 'zero_sus' || u.username.toLowerCase() === 'zero_sus')
-            ? prev.map((u) =>
-                u.id === 'zero_sus' || u.username.toLowerCase() === 'zero_sus' ? adminProfile : u
-              )
-            : [adminProfile, ...prev]
-        );
-        pushNotification(
-          '👑 Developer Admin Activated (@zero_sus)',
-          'Logged in with UID: zero_sus. 0s cooldown, Erase tool, and full User/Canvas Admin Panel unlocked!',
-          '👑',
-          'admin'
-        );
-        trackGameEvent('login', { method: 'admin_zero_sus' });
-        return { ok: true };
       }
 
-      let firebaseUid: string | null = null;
-
-      if (payload.email && payload.password && payload.email.includes('@')) {
-        try {
-          if (payload.mode === 'signup') {
-            const prof = await registerWithEmail({
-              email: payload.email,
-              password: payload.password,
-              username: payload.username,
-              avatarEmoji: payload.avatarEmoji,
-              avatarColor: payload.avatarColor,
-            });
-            firebaseUid = prof.id;
-          } else {
-            const prof = await loginWithEmail(payload.email, payload.password);
-            firebaseUid = prof.id;
-          }
-        } catch (err: any) {
-          // If Firebase Auth succeeded in creating/signing in the user but RTDB profile read threw permission_denied,
-          // check if getFirebaseAuth().currentUser is populated!
-          const activeFbUser = getFirebaseAuth().currentUser;
-          if (activeFbUser && activeFbUser.email?.toLowerCase() === payload.email.trim().toLowerCase()) {
-            firebaseUid = activeFbUser.uid;
-          } else {
-            return { ok: false, error: formatFirebaseAuthError(err) };
-          }
-        }
+      if (payload.mode === 'signup' && isReservedAdminHandle(payload.username)) {
+        return {
+          ok: false,
+          error: 'Username "@zero_sus" is strictly reserved for the verified developer admin.',
+        };
       }
 
-      const cleanHandle = (
-        payload.username ||
-        payload.email?.split('@')[0] ||
-        `pixel_${Math.floor(100 + Math.random() * 899)}`
-      )
-        .replace(/^@/, '')
-        .replace(/[^a-zA-Z0-9_.-]/g, '')
-        .slice(0, 24);
-
-      if (connectionMode === 'local-server' && isLocalhostRuntime()) {
-        try {
-          const res = await fetch('/api/auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: firebaseUid || undefined,
-              username: cleanHandle,
-              loginByUsername: !firebaseUid,
-              avatarEmoji: payload.avatarEmoji,
-              avatarColor: payload.avatarColor,
-            }),
+      try {
+        let authenticatedProfile: PlayerProfile;
+        if (payload.mode === 'signup') {
+          if (!payload.email || !payload.email.includes('@')) {
+            return { ok: false, error: 'Please enter a valid email address to create an account.' };
+          }
+          authenticatedProfile = await registerWithEmail({
+            email: payload.email,
+            password: payload.password,
+            username: payload.username,
+            avatarEmoji: payload.avatarEmoji,
+            avatarColor: payload.avatarColor,
           });
-          const data = await res.json();
-          if (data.ok && data.user) {
-            const mergedUser: PlayerProfile = firebaseUid
-              ? { ...data.user, id: firebaseUid }
-              : data.user;
-            window.localStorage.setItem(USER_ID_STORAGE_KEY, mergedUser.id);
-            setCurrentUser(mergedUser);
-            setUsers((prev) =>
-              prev.some((u) => u.id === mergedUser.id)
-                ? prev.map((u) => (u.id === mergedUser.id ? mergedUser : u))
-                : [...prev, mergedUser]
-            );
-            pushNotification(
-              `Signed in as @${mergedUser.username}`,
-              'Your Firebase UID, cooldown, and pixel stats are now synced.',
-              mergedUser.avatarEmoji || '👾'
-            );
-            trackGameEvent('login', { method: payload.email ? 'email' : 'username' });
-            return { ok: true };
+        } else {
+          const loginIdentifier = (payload.email || payload.username || '').trim();
+          if (!loginIdentifier) {
+            return { ok: false, error: 'Please enter your email or username.' };
           }
-        } catch {
-          // fallback
+          authenticatedProfile = await loginWithEmail(loginIdentifier, payload.password);
         }
-      }
 
-      let found = users.find(
-        (u) =>
-          (firebaseUid && u.id === firebaseUid) ||
-          u.username.toLowerCase() === cleanHandle.toLowerCase()
-      );
-      if (!found) {
-        found = {
-          id: firebaseUid || `usr-${Date.now().toString(36)}`,
-          username: cleanHandle,
-          displayName: cleanHandle,
-          avatarEmoji: payload.avatarEmoji || '👾',
-          avatarColor: payload.avatarColor || '#6B3DFF',
-          bio: 'Playing on the 1,000,000-pixel global wall.',
-          pixelsPlaced: 0,
-          tasksCompleted: 0,
-          points: 50,
-          lastPixelAt: 0,
-          nextCooldownAt: 0,
-          joinedAt: Date.now(),
-          achievements: [],
-        };
-        setUsers((prev) => [...prev, found!]);
+        window.localStorage.setItem(USER_ID_STORAGE_KEY, authenticatedProfile.id);
+        setCurrentUser(authenticatedProfile);
+        setUsers((prev) =>
+          prev.some((u) => u.id === authenticatedProfile.id)
+            ? prev.map((u) => (u.id === authenticatedProfile.id ? authenticatedProfile : u))
+            : [authenticatedProfile, ...prev]
+        );
+
+        if (isDeveloperAdmin(authenticatedProfile)) {
+          pushNotification(
+            '👑 Developer Admin Verified (@zero_sus)',
+            'Authenticated via Firebase Auth. 0s cooldown, Erase tool, and Admin Command Center unlocked.',
+            '👑',
+            'admin'
+          );
+          trackGameEvent('login', { method: 'admin_firebase_verified' });
+        } else {
+          pushNotification(
+            `Signed in as @${authenticatedProfile.username}`,
+            'Your Firebase UID, cooldown, and pixel stats are now synced.',
+            authenticatedProfile.avatarEmoji || '👾'
+          );
+          trackGameEvent('login', { method: 'email' });
+        }
+        return { ok: true };
+      } catch (err: any) {
+        return { ok: false, error: formatFirebaseAuthError(err) };
       }
-      window.localStorage.setItem(USER_ID_STORAGE_KEY, found.id);
-      setCurrentUser(found);
-      pushNotification(
-        `Signed in as @${found.username}`,
-        'Ready to place pixels and complete your 5 daily objects!',
-        found.avatarEmoji
-      );
-      return { ok: true };
     },
-    [connectionMode, users, pushNotification]
+    [pushNotification]
   );
 
   const handleGoogleLogin = useCallback(async () => {
@@ -1664,33 +1575,31 @@ export function App() {
       const prof = await loginWithGooglePopup();
       window.localStorage.setItem(USER_ID_STORAGE_KEY, prof.id);
       setCurrentUser(prof);
-      setUsers((prev) => (prev.some((u) => u.id === prof.id) ? prev : [...prev, prof]));
-      pushNotification(
-        `Signed in with Google as @${prof.username}`,
-        'Your Firebase UID is active across the 1000×1000 wall.',
-        prof.avatarEmoji
+      setUsers((prev) =>
+        prev.some((u) => u.id === prof.id)
+          ? prev.map((u) => (u.id === prof.id ? prof : u))
+          : [prof, ...prev]
       );
+      if (isDeveloperAdmin(prof)) {
+        pushNotification(
+          '👑 Developer Admin Verified (@zero_sus)',
+          'Authenticated with Google OAuth. Admin Command Center unlocked.',
+          '👑',
+          'admin'
+        );
+      } else {
+        pushNotification(
+          `Signed in with Google as @${prof.username}`,
+          'Your Firebase UID is active across the 1000×1000 wall.',
+          prof.avatarEmoji
+        );
+      }
       trackGameEvent('login', { method: 'google' });
       return { ok: true };
     } catch (err: any) {
-      const activeFbUser = getFirebaseAuth().currentUser;
-      if (activeFbUser) {
-        const cleanName = (
-          activeFbUser.displayName ||
-          activeFbUser.email?.split('@')[0] ||
-          `google_${activeFbUser.uid.slice(0, 5)}`
-        )
-          .replace(/[^a-zA-Z0-9_.-]/g, '')
-          .slice(0, 22);
-        return await handleAuthAction({
-          mode: 'login',
-          username: cleanName,
-          email: activeFbUser.email || undefined,
-        });
-      }
       return { ok: false, error: formatFirebaseAuthError(err) };
     }
-  }, [pushNotification, handleAuthAction]);
+  }, [pushNotification]);
 
   const handleResetPassword = useCallback(async (email: string) => {
     try {
@@ -1701,10 +1610,21 @@ export function App() {
     }
   }, []);
 
+  const handleChangePassword = useCallback(async (newPassword: string) => {
+    try {
+      await changeUserPassword(newPassword);
+      pushNotification('Password Updated', 'Your Dotwall account password has been changed.', '🔑');
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: formatFirebaseAuthError(err) };
+    }
+  }, [pushNotification]);
+
   const handleLogout = useCallback(async () => {
     await logoutFirebaseUser();
     window.localStorage.removeItem(USER_ID_STORAGE_KEY);
     setCurrentUser(null);
+    setActiveTab((prev) => (prev === 'admin' ? 'home' : prev));
     pushNotification('Signed Out', 'You have signed out of your Dotwall account.', '👋');
   }, [pushNotification]);
 
@@ -1715,10 +1635,20 @@ export function App() {
   }, []);
 
   // =========================================================================
-  // DEVELOPER / ADMIN HANDLERS (`@zero_sus`) — REAL-TIME GLOBAL MODERATION
+  // DEVELOPER / ADMIN HANDLERS (`@zero_sus`) — VERIFIED ADMIN ONLY
   // =========================================================================
+  // Immediately redirect away from 'admin' tab if current user is not verified @zero_sus
+  useEffect(() => {
+    if (activeTab === 'admin' && !isAdmin) {
+      setActiveTab('home');
+    }
+  }, [activeTab, isAdmin]);
+
   const handleAdminErasePixels = useCallback(
     async (coords: { x: number; y: number }[]) => {
+      if (!isDeveloperAdmin(currentUser)) {
+        return { ok: false, count: 0 };
+      }
       if (!coords || coords.length === 0) return { ok: true, count: 0 };
       setPixelsMap((prev) => {
         const next = new Map(prev);
@@ -1729,15 +1659,11 @@ export function App() {
         persistToLocalStore(next, users, history, taskSubmissions, artworks, comments);
         return next;
       });
-      await adminErasePixelsInFirebase(coords);
-      publishGlobalRelayEvent({
-        type: 'pixel_erased',
-        coords,
-        adminUsername: currentUser?.username || 'zero_sus',
-      });
+      await adminErasePixelsInFirebase(currentUser, coords);
       return { ok: true, count: coords.length };
     },
     [
+      currentUser,
       recomputeStatsFromState,
       users,
       artworks,
@@ -1745,16 +1671,18 @@ export function App() {
       history,
       taskSubmissions,
       comments,
-      currentUser?.username,
     ]
   );
 
   const handleAdminBatchPlacePixels = useCallback(
     async (coords: { x: number; y: number }[], color: string) => {
+      if (!isDeveloperAdmin(currentUser)) {
+        return { ok: false, count: 0 };
+      }
       if (!coords || coords.length === 0) return { ok: true, count: 0 };
-      const now = Date.now();
-      const ownerId = currentUser?.id || 'zero_sus';
-      const ownerUsername = currentUser?.username || 'zero_sus';
+      const now = getEstimatedServerNow();
+      const ownerId = currentUser.id;
+      const ownerUsername = currentUser.username;
       const cleanColor = color.toUpperCase();
       const placedPixels: GlobalPixel[] = [];
 
@@ -1781,17 +1709,11 @@ export function App() {
         return next;
       });
 
-      publishGlobalRelayEvent({
-        type: 'pixels_batch_placed',
-        pixels: placedPixels,
-        adminUsername: ownerUsername,
-      });
-
+      await adminBatchPlacePixelsInFirebase(currentUser, placedPixels);
       return { ok: true, count: placedPixels.length };
     },
     [
-      currentUser?.id,
-      currentUser?.username,
+      currentUser,
       recomputeStatsFromState,
       users,
       artworks,
@@ -1804,6 +1726,7 @@ export function App() {
 
   const handleAdminWipeUserPixels = useCallback(
     async (userIdOrUsername: string) => {
+      if (!isDeveloperAdmin(currentUser)) return 0;
       const clean = userIdOrUsername.trim().replace(/^@/, '').toLowerCase();
       const targetUser = users.find(
         (u) => u.id.toLowerCase() === clean || u.username.toLowerCase() === clean
@@ -1826,11 +1749,12 @@ export function App() {
       }
       return coordsToRemove.length;
     },
-    [users, pixelsMap, handleAdminErasePixels]
+    [currentUser, users, pixelsMap, handleAdminErasePixels]
   );
 
   const handleAdminDeleteUser = useCallback(
     async (userIdOrUsername: string, wipeContent: boolean) => {
+      if (!isDeveloperAdmin(currentUser)) return;
       const clean = userIdOrUsername.trim().replace(/^@/, '').toLowerCase();
       if (clean === 'zero_sus') return;
 
@@ -1858,7 +1782,7 @@ export function App() {
           }
         });
         if (coordsToRemove.length > 0) {
-          await adminErasePixelsInFirebase(coordsToRemove);
+          await adminErasePixelsInFirebase(currentUser, coordsToRemove);
         }
         setPixelsMap((prev) => {
           const next = new Map(prev);
@@ -1884,15 +1808,10 @@ export function App() {
         persistToLocalStore(pixelsMap, nextUsers, history, taskSubmissions, artworks, comments);
       }
 
-      await adminDeleteUserInFirebase(targetId);
-      publishGlobalRelayEvent({
-        type: 'user_deleted',
-        userId: targetId,
-        username: targetName,
-        wipeContent,
-      });
+      await adminDeleteUserInFirebase(currentUser, targetId);
     },
     [
+      currentUser,
       users,
       pixelsMap,
       artworks,
@@ -1906,6 +1825,7 @@ export function App() {
 
   const handleAdminUpdateUser = useCallback(
     async (updatedUser: PlayerProfile) => {
+      if (!isDeveloperAdmin(currentUser)) return;
       const nextUsers = users.some((u) => u.id === updatedUser.id)
         ? users.map((u) => (u.id === updatedUser.id ? updatedUser : u))
         : [...users, updatedUser];
@@ -1914,10 +1834,7 @@ export function App() {
         setCurrentUser(updatedUser);
       }
       persistToLocalStore(pixelsMap, nextUsers, history, taskSubmissions, artworks, comments);
-      publishGlobalRelayEvent({
-        type: 'user_updated',
-        user: updatedUser,
-      });
+      await adminUpdateUserInFirebase(currentUser, updatedUser);
     },
     [users, currentUser, persistToLocalStore, pixelsMap, history, taskSubmissions, artworks, comments]
   );
@@ -1930,6 +1847,7 @@ export function App() {
       avatarColor: string;
       points: number;
     }) => {
+      if (!isDeveloperAdmin(currentUser)) return;
       const created: PlayerProfile = {
         id: `usr-${Date.now().toString(36)}`,
         username: payload.username,
@@ -1947,71 +1865,66 @@ export function App() {
       };
       await handleAdminUpdateUser(created);
     },
-    [handleAdminUpdateUser]
+    [currentUser, handleAdminUpdateUser]
   );
 
   const handleAdminDeleteArtwork = useCallback(
     async (artworkId: string) => {
+      if (!isDeveloperAdmin(currentUser)) return;
       const nextArts = artworks.filter((a) => a.id !== artworkId);
       setArtworks(nextArts);
       if (selectedExploreArtwork?.id === artworkId) {
         setSelectedExploreArtwork(null);
       }
       persistToLocalStore(pixelsMap, users, history, taskSubmissions, nextArts, comments);
-      await adminDeleteArtworkInFirebase(artworkId);
-      publishGlobalRelayEvent({
-        type: 'artwork_deleted',
-        artworkId,
-      });
+      await adminDeleteArtworkInFirebase(currentUser, artworkId);
     },
-    [artworks, selectedExploreArtwork?.id, persistToLocalStore, pixelsMap, users, history, taskSubmissions, comments]
+    [currentUser, artworks, selectedExploreArtwork?.id, persistToLocalStore, pixelsMap, users, history, taskSubmissions, comments]
   );
 
   const handleAdminDeleteComment = useCallback(
     async (commentId: string) => {
+      if (!isDeveloperAdmin(currentUser)) return;
       const nextCmts = comments.filter((c) => c.id !== commentId);
       setComments(nextCmts);
       persistToLocalStore(pixelsMap, users, history, taskSubmissions, artworks, nextCmts);
-      await adminDeleteCommentInFirebase(commentId);
-      publishGlobalRelayEvent({
-        type: 'comment_deleted',
-        commentId,
-      });
+      await adminDeleteCommentInFirebase(currentUser, commentId);
     },
-    [comments, persistToLocalStore, pixelsMap, users, history, taskSubmissions, artworks]
+    [currentUser, comments, persistToLocalStore, pixelsMap, users, history, taskSubmissions, artworks]
   );
 
   const handleAdminClearCanvas = useCallback(
     async (mode: 'empty' | 'seed') => {
+      if (!isDeveloperAdmin(currentUser)) return;
+      const coordsToErase: { x: number; y: number }[] = [];
+      pixelsMap.forEach((px) => coordsToErase.push({ x: px.x, y: px.y }));
+      if (coordsToErase.length > 0) {
+        await adminErasePixelsInFirebase(currentUser, coordsToErase);
+      }
+
       const nextMap = new Map<string, GlobalPixel>();
       if (mode === 'seed') {
         const seed = createInitialDatabaseSeed();
-        Object.values(seed.pixels as Record<string, GlobalPixel>).forEach((px) => {
+        const seedPixels = Object.values(seed.pixels as Record<string, GlobalPixel>);
+        seedPixels.forEach((px) => {
           nextMap.set(`${px.x},${px.y}`, px);
         });
+        await adminBatchPlacePixelsInFirebase(currentUser, seedPixels);
       }
       setPixelsMap(nextMap);
       setStats(recomputeStatsFromState(nextMap, users, artworks));
       persistToLocalStore(nextMap, users, history, taskSubmissions, artworks, comments);
-      publishGlobalRelayEvent({
-        type: 'canvas_cleared',
-        mode,
-      });
     },
-    [recomputeStatsFromState, users, artworks, persistToLocalStore, history, taskSubmissions, comments]
+    [currentUser, pixelsMap, recomputeStatsFromState, users, artworks, persistToLocalStore, history, taskSubmissions, comments]
   );
 
   const handleAdminBroadcast = useCallback(
     async (title: string, message: string) => {
+      if (!isDeveloperAdmin(currentUser)) return;
       pushNotification(title, message, '👑');
-      publishGlobalRelayEvent({
-        type: 'admin_broadcast',
-        title,
-        message,
-        timestamp: Date.now(),
-      });
+      await adminBroadcastInFirebase(currentUser, title, message);
     },
-    [pushNotification]
+    [currentUser, pushNotification]
   );
 
   const unreadNotificationsCount = useMemo(
@@ -2051,7 +1964,7 @@ export function App() {
     { id: 'leaderboard', label: 'Leaderboard', icon: <Trophy size={14} /> },
     { id: 'community', label: 'Community', icon: <MessageSquare size={14} /> },
     { id: 'profile', label: 'Profile', icon: <User size={14} /> },
-    { id: 'admin', label: '👑 Admin', icon: <ShieldCheck size={14} /> },
+    ...(isAdmin ? [{ id: 'admin' as NavTab, label: '👑 Admin', icon: <ShieldCheck size={14} /> }] : []),
   ];
 
   const isCurrentlyDark =
@@ -2120,7 +2033,7 @@ export function App() {
               id="status"
               data-state={connectionState}
               onClick={() => setShowPresenceDropdown((p) => !p)}
-              title="Click to view active online players & Firebase config"
+              title="Click to view active online players"
             >
               <i className="dot" />
               <span id="statusText">
@@ -2134,16 +2047,18 @@ export function App() {
               <div className="popover-card">
                 <div className="popover-head">
                   <strong>Live Player Presence ({stats.onlinePlayersCount})</strong>
-                  <button
-                    type="button"
-                    className="mini-link-btn"
-                    onClick={() => {
-                      setShowPresenceDropdown(false);
-                      setActiveTab('admin');
-                    }}
-                  >
-                    <ShieldCheck size={11} /> 👑 Admin Panel
-                  </button>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      className="mini-link-btn"
+                      onClick={() => {
+                        setShowPresenceDropdown(false);
+                        setActiveTab('admin');
+                      }}
+                    >
+                      <ShieldCheck size={11} /> 👑 Admin Panel
+                    </button>
+                  )}
                 </div>
                 <ul className="feed">
                   {stats.onlinePlayers.map((p) => (
@@ -2206,7 +2121,9 @@ export function App() {
                       key={n.id}
                       className="notif-item"
                       onClick={() => {
-                        if (n.linkTab) setActiveTab(n.linkTab);
+                        if (n.linkTab && (n.linkTab !== 'admin' || isAdmin)) {
+                          setActiveTab(n.linkTab);
+                        }
                         setShowNotifDropdown(false);
                       }}
                     >
@@ -2249,26 +2166,31 @@ export function App() {
             <Paintbrush size={15} />
           </button>
 
-          {/* Developer Admin Panel Quick Pill */}
-          <button
-            type="button"
-            className="user-nav-pill"
-            style={{
-              borderColor: activeTab === 'admin' ? 'var(--accent)' : undefined,
-              background: activeTab === 'admin' ? 'var(--accent-soft)' : undefined,
-            }}
-            onClick={() => setActiveTab('admin')}
-            title="Open Developer & Admin Panel (@zero_sus)"
-          >
-            <ShieldCheck size={14} />
-            <span className="user-nav-name">👑 Admin</span>
-          </button>
+          {/* Developer Admin Panel Quick Pill — ONLY rendered for verified @zero_sus */}
+          {isAdmin && (
+            <button
+              type="button"
+              className="user-nav-pill"
+              style={{
+                borderColor: activeTab === 'admin' ? 'var(--accent)' : undefined,
+                background: activeTab === 'admin' ? 'var(--accent-soft)' : undefined,
+              }}
+              onClick={() => setActiveTab('admin')}
+              title="Open Developer & Admin Panel (@zero_sus)"
+            >
+              <ShieldCheck size={14} />
+              <span className="user-nav-name">👑 Admin</span>
+            </button>
+          )}
 
           {/* Login / Account Pill */}
           <button
             type="button"
             className="user-nav-pill"
-            onClick={() => setShowAuthModal(true)}
+            onClick={() => {
+              setAuthModalTab('login');
+              setShowAuthModal(true);
+            }}
             title="Sign In / Switch Account"
           >
             {currentUser ? (
@@ -2288,6 +2210,20 @@ export function App() {
               </>
             )}
           </button>
+
+          {/* Quick Log Out Button */}
+          {currentUser && (
+            <button
+              type="button"
+              className="user-nav-pill"
+              style={{ color: '#FF6B6B', borderColor: 'rgba(235, 87, 87, 0.4)' }}
+              onClick={handleLogout}
+              title="Sign Out / Log Out"
+            >
+              <LogOut size={14} />
+              <span className="user-nav-name">Log Out</span>
+            </button>
+          )}
         </div>
       </nav>
 
@@ -2325,10 +2261,24 @@ export function App() {
                 <button
                   type="button"
                   className="btn"
-                  onClick={() => setShowAuthModal(true)}
+                  onClick={() => {
+                    setAuthModalTab('login');
+                    setShowAuthModal(true);
+                  }}
                 >
                   <LogIn size={15} /> {currentUser ? `@${currentUser.username}` : 'Login / Sign Up'}
                 </button>
+                {currentUser && (
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ color: '#FF6B6B', borderColor: 'rgba(235, 87, 87, 0.4)' }}
+                    onClick={handleLogout}
+                    title="Log Out of your Dotwall account"
+                  >
+                    <LogOut size={15} /> Log Out
+                  </button>
+                )}
               </div>
             </div>
 
@@ -2490,10 +2440,10 @@ export function App() {
               nextCooldownAt={nextCooldownAt}
               onPlacePixel={handlePlacePixel}
               onUndoPixel={handleUndoPixel}
-              onAdminErasePixels={handleAdminErasePixels}
-              onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
-              onAdminDeleteUser={handleAdminDeleteUser}
-              onOpenAdminPanel={() => setActiveTab('admin')}
+              onAdminErasePixels={isAdmin ? handleAdminErasePixels : undefined}
+              onAdminBatchPlacePixels={isAdmin ? handleAdminBatchPlacePixels : undefined}
+              onAdminDeleteUser={isAdmin ? handleAdminDeleteUser : undefined}
+              onOpenAdminPanel={isAdmin ? () => setActiveTab('admin') : undefined}
               onInspectPlayer={handleInspectPlayer}
               onVisibleChunksChange={setVisibleChunkIds}
             />
@@ -2544,10 +2494,10 @@ export function App() {
             nextCooldownAt={nextCooldownAt}
             onPlacePixel={handlePlacePixel}
             onUndoPixel={handleUndoPixel}
-            onAdminErasePixels={handleAdminErasePixels}
-            onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
-            onAdminDeleteUser={handleAdminDeleteUser}
-            onOpenAdminPanel={() => setActiveTab('admin')}
+            onAdminErasePixels={isAdmin ? handleAdminErasePixels : undefined}
+            onAdminBatchPlacePixels={isAdmin ? handleAdminBatchPlacePixels : undefined}
+            onAdminDeleteUser={isAdmin ? handleAdminDeleteUser : undefined}
+            onOpenAdminPanel={isAdmin ? () => setActiveTab('admin') : undefined}
             onInspectPlayer={handleInspectPlayer}
             onVisibleChunksChange={setVisibleChunkIds}
           />
@@ -2628,7 +2578,15 @@ export function App() {
           onClearInspectedUser={() => setInspectedUsername(null)}
           onInspectPlayer={handleInspectPlayer}
           onUpdateProfile={handleUpdateProfile}
-          onSwitchAccount={(uName) => handleAuthAction({ mode: 'login', username: uName })}
+          onOpenAuthModal={() => {
+            setAuthModalTab('login');
+            setShowAuthModal(true);
+          }}
+          onOpenChangePassword={() => {
+            setAuthModalTab('change');
+            setShowAuthModal(true);
+          }}
+          onLogout={handleLogout}
           onOpenArtwork={(art) => {
             setSelectedExploreArtwork(art);
             setActiveTab('explore');
@@ -2636,8 +2594,8 @@ export function App() {
         />
       )}
 
-      {/* VIEW 8: DEVELOPER & ADMIN COMMAND CENTER (@zero_sus) */}
-      {activeTab === 'admin' && (
+      {/* VIEW 8: DEVELOPER & ADMIN COMMAND CENTER (@zero_sus) — STRICTLY VERIFIED ADMIN ONLY */}
+      {activeTab === 'admin' && isAdmin && (
         <AdminPanelView
           currentUser={currentUser}
           users={users}
@@ -2646,15 +2604,6 @@ export function App() {
           artworks={artworks}
           comments={comments}
           stats={stats}
-          onLoginAsAdmin={async () => {
-            await handleAuthAction({
-              mode: 'admin',
-              username: 'zero_sus',
-              email: 'zero_sus@dotwall.app',
-              avatarEmoji: '👑',
-              avatarColor: '#6B3DFF',
-            });
-          }}
           onAdminErasePixels={handleAdminErasePixels}
           onAdminBatchPlacePixels={handleAdminBatchPlacePixels}
           onAdminDeleteUser={handleAdminDeleteUser}
@@ -2790,12 +2739,13 @@ export function App() {
         currentUser={currentUser}
         users={users}
         isFirebaseActive={true}
+        initialTab={authModalTab}
         onLogin={handleAuthAction}
         onGoogleLogin={handleGoogleLogin}
         onPasswordReset={handleResetPassword}
+        onChangePassword={handleChangePassword}
         onLogout={handleLogout}
-        onOpenCloudConfig={() => setActiveTab('admin')}
-        onOpenAdminPanel={() => setActiveTab('admin')}
+        onOpenAdminPanel={isAdmin ? () => setActiveTab('admin') : undefined}
       />
 
       {/* FOOTER */}
@@ -2805,13 +2755,15 @@ export function App() {
           {stats.pixelsUsed.toLocaleString()} pixels placed
         </span>
         <span style={{ display: 'flex', gap: 10 }}>
-          <button
-            type="button"
-            className="mini-link-btn"
-            onClick={() => setActiveTab('admin')}
-          >
-            👑 Admin Panel (@zero_sus)
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              className="mini-link-btn"
+              onClick={() => setActiveTab('admin')}
+            >
+              👑 Admin Panel (@zero_sus)
+            </button>
+          )}
           <button
             type="button"
             className="mini-link-btn"
