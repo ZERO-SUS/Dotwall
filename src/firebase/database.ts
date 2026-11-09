@@ -236,10 +236,26 @@ export async function placePixelInFirebase(params: {
   try {
     await update(ref(db), multiPathUpdates);
   } catch (err: any) {
-    return {
-      ok: false,
-      error: err?.message || 'Atomic pixel placement rejected by database security rules.',
-    };
+    // If rejected due to missing ownerCountry / ownerAvatarUrl in older rules, retry with base payload
+    if (pixelPayload.ownerCountry || pixelPayload.ownerAvatarUrl) {
+      delete pixelPayload.ownerCountry;
+      delete pixelPayload.ownerAvatarUrl;
+      delete historyPayload.country;
+      delete historyPayload.avatarUrl;
+      try {
+        await update(ref(db), multiPathUpdates);
+      } catch (retryErr: any) {
+        return {
+          ok: false,
+          error: retryErr?.message || 'Atomic pixel placement rejected by database security rules.',
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        error: err?.message || 'Atomic pixel placement rejected by database security rules.',
+      };
+    }
   }
 
   const committedPixel: GlobalPixel = {
@@ -551,13 +567,48 @@ export async function updateProfileInFirebase(
       ...(isAdmin ? { isAdmin: true } : {}),
     };
 
-    const dbPayload: Record<string, any> = {
-      ...updatedProfile,
-      avatarUrl: resolvedAvatarUrl || null,
-      country: resolvedCountry || null,
-      updatedAt: serverTimestamp(),
-    };
-    await set(userRef, dbPayload);
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        if (resolvedAvatarUrl) {
+          window.localStorage.setItem(`dotwall_dp_${user.id}`, resolvedAvatarUrl);
+        } else {
+          window.localStorage.removeItem(`dotwall_dp_${user.id}`);
+        }
+        if (resolvedCountry) {
+          window.localStorage.setItem(`dotwall_country_${user.id}`, resolvedCountry);
+        } else {
+          window.localStorage.removeItem(`dotwall_country_${user.id}`);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const dbPayload: Record<string, any> = {
+        ...updatedProfile,
+        avatarUrl: resolvedAvatarUrl || null,
+        country: resolvedCountry || null,
+        updatedAt: serverTimestamp(),
+      };
+      await set(userRef, dbPayload);
+    } catch (err: any) {
+      if (resolvedAvatarUrl || resolvedCountry) {
+        try {
+          const fallbackPayload: Record<string, any> = {
+            ...updatedProfile,
+            updatedAt: serverTimestamp(),
+          };
+          delete fallbackPayload.avatarUrl;
+          delete fallbackPayload.country;
+          await set(userRef, fallbackPayload);
+        } catch (fbErr: any) {
+          return { ok: false, error: fbErr?.message || 'Could not update profile.' };
+        }
+      } else {
+        return { ok: false, error: err?.message || 'Could not update profile.' };
+      }
+    }
     return { ok: true, user: updatedProfile };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Could not update profile.' };

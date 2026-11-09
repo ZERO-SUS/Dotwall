@@ -108,6 +108,17 @@ export async function ensurePlayerProfileInDb(
       ? RESERVED_ADMIN_USERNAME
       : sanitizePublicUsername(data.username || fbUser.displayName, fbUser.uid);
 
+    let localDp: string | undefined;
+    let localCountry: string | undefined;
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localDp = window.localStorage.getItem(`dotwall_dp_${fbUser.uid}`) || undefined;
+        localCountry = window.localStorage.getItem(`dotwall_country_${fbUser.uid}`) || undefined;
+      }
+    } catch {
+      // ignore
+    }
+
     return {
       id: fbUser.uid,
       username: safeUsername,
@@ -116,8 +127,8 @@ export async function ensurePlayerProfileInDb(
         : data.displayName || safeUsername,
       avatarEmoji: isAdminUser ? data.avatarEmoji || '👑' : data.avatarEmoji || '👾',
       avatarColor: data.avatarColor || '#6B3DFF',
-      avatarUrl: data.avatarUrl || fbUser.photoURL || undefined,
-      country: data.country || undefined,
+      avatarUrl: data.avatarUrl || localDp || fbUser.photoURL || undefined,
+      country: data.country || localCountry || undefined,
       bio: isAdminUser
         ? data.bio || 'Creator & Lead Developer of Dotwall 1000×1000.'
         : data.bio || 'Collaborating on the 1,000,000-pixel global wall.',
