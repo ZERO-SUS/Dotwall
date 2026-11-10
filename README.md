@@ -1,5 +1,5 @@
 # DOTWALL — 1,000,000-Pixel Global Collaborative Multiplayer Game
-
+https://zero-sus.github.io/Dotwall/
 **Dotwall** is an online collaborative pixel-art platform and multiplayer game built with **React**, **TypeScript**, **HTML5 Canvas**, **Vite**, and a dual-mode real-time multiplayer backend (**Supabase PostgreSQL + Realtime** & built-in **Node SSE/REST Multiplayer Server**).
 
 ---
